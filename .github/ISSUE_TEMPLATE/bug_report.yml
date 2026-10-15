@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible transcription, CLI, or web UI problem.
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Include the command or UI actions. Use a synthetic/public sample if possible.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Environment
+      description: OS, hardware, Python version, model/mode, device, file format, and audio duration.
+  - type: textarea
+    attributes:
+      label: Error output
+      description: Remove tokens, private transcripts, and personal file paths before sharing logs.
+      render: text

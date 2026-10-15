@@ -1,0 +1,5 @@
+# Lightweight regression/CI environment: no ASR weights, PyTorch or credentials.
+numpy>=1.26
+flask>=3.1,<4
+python-docx>=1.2,<2
+ruff==0.14.14

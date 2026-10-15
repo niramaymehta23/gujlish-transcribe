@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gujarati ASR · Local transcription</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/" aria-label="Gujarati ASR home"><span class="brand-mark" lang="gu">અ</span>Gujarati ASR</a><span class="local"><i></i> Local workspace</span></header>
+<main>
+  <div class="intro"><p class="eyebrow">AUDIO → TEXT</p><h1>Your recording.<br>Your words.</h1><p>Transcribe Gujarati and English, together.</p></div>
+  <div class="workspace">
+    <section class="input-panel" aria-labelledby="input-heading">
+      <div class="section-title"><span class="step">01</span><h2 id="input-heading">Add a recording</h2></div>
+      <form id="upload-form">
+        <label class="dropzone" id="dropzone" for="audio-input">
+          <input id="audio-input" name="audio" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.opus,.ogg,.flac,.aac,.webm,.mp4,.mov,.mkv,.aiff,.wma" required>
+          <svg viewBox="0 0 32 32" width="36" height="36" aria-hidden="true"><path d="M16 22V5m-6 6 6-6 6 6M6 22v5h20v-5"/></svg>
+          <strong id="file-name">Drop an audio file here</strong><span id="file-detail">or click to choose a file</span>
+        </label>
+        <p class="formats">M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM<br>Also accepts audio tracks from video. Up to 4 GB.</p>
+        <label class="field-label" for="model">Transcription model</label>
+        <select name="model" id="model"><option value="flex">Flex · Gujarati + English</option><option value="gujlish">Gujlish · CTC comparison</option></select>
+        <div id="mode-field"><label class="field-label" for="mode">Output script</label><select name="mode" id="mode"><option value="mixed">Mixed · Gujarati + Latin English</option><option value="native">Native · Gujarati script</option></select></div>
+        <button class="primary" id="start-button" type="submit">Transcribe recording <span aria-hidden="true">↗</span></button>
+        <p class="privacy">Processed on this computer. Recordings and results stay in your project folders.</p>
+      </form>
+      <div class="history-section"><h3>Previous runs</h3><div id="history"><p class="muted">No saved transcripts yet.</p></div></div>
+    </section>
+    <section class="output-panel" aria-labelledby="output-heading">
+      <div class="section-title"><span class="step">02</span><h2 id="output-heading">Transcript</h2><span id="result-meta"></span></div>
+      <div id="empty-state" class="empty-state"><div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><h3>A place for your words.</h3><p>Add a recording to get started.<br>Your transcript will appear here.</p><span lang="gu" class="gujarati-note">અવાજથી શબ્દો સુધી</span></div>
+      <div id="processing" class="processing" hidden aria-live="polite"><span class="spinner" aria-hidden="true"></span><h3 id="status-label">Uploading recording…</h3><p id="status-detail"></p><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><div class="progress-caption"><span id="progress-description">Preparing your recording</span><span id="progress-percent"></span></div></div>
+      <div id="error-state" class="error-state" hidden role="alert"><h3>Couldn’t complete this run</h3><p id="error-message"></p><button id="retry-button" class="secondary" type="button" hidden>Retry & resume</button></div>
+      <div id="result" hidden><div class="result-toolbar"><span class="ready"><i></i> Ready</span><div class="export-actions"><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a></div></div><div id="transcript" class="transcript" tabindex="0"></div><p class="result-note">Review names and technical terms before sharing.</p></div>
+    </section>
+  </div>
+  <footer><span>GUJARATI ASR</span><span>Local audio. Mixed language. Plain text.</span></footer>
+</main>
+</body>
+</html>
