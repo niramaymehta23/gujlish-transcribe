@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -35,7 +36,10 @@ class FlexBackend:
     def __init__(self, device: str):
         from huggingface_hub import snapshot_download
 
-        model_dir = Path(snapshot_download(FLEX_REPO, ignore_patterns=["nemo/*"]))
+        # The Flex wrapper is Python code from the model repository and is executed below. Set
+        # GUJLISH_FLEX_REVISION to a commit hash you have reviewed to stop upstream changes from altering behaviour.
+        revision = os.environ.get("GUJLISH_FLEX_REVISION") or None
+        model_dir = Path(snapshot_download(FLEX_REPO, ignore_patterns=["nemo/*"], revision=revision))
         sys.path.insert(0, str(model_dir))
         try:
             module_path = model_dir / "indic_transcribe.py"

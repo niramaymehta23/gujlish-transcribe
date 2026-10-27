@@ -42,3 +42,7 @@ Accelerator selection is implemented, but no controlled M3 Pro throughput compar
 GitHub preparation added the selected MIT application license, contributor/security guidance, issue/PR templates, formatting checks, and CI using synthetic audio without model downloads. Ignore rules exclude private recordings, outputs, credentials, environments, and model weights. Upstream model licenses remain separate.
 
 The next evidence-producing steps are a labelled Gujarati/code-switching evaluation, a controlled M3 Pro runtime/memory comparison, and an hour-plus recovery test. The implemented application provides a small, inspectable base for those experiments; it does not claim those objectives have already been validated.
+
+## Later revision: chunking, translation and summaries
+
+Pause-aware chunking, output guards, spoken-tone English translation and structured summaries were added afterwards. The design, the research behind it and the unmeasured parts are in [design-notes.md](design-notes.md). Verification covered unit tests, real-speech boundary measurements with Silero VAD, and an end-to-end run with a stand-in recogniser and scripted language-model servers; Flex and real translation models were not run.

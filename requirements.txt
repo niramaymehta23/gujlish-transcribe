@@ -7,3 +7,4 @@ soundfile>=0.12
 matplotlib>=3.8
 flask>=3.1,<4
 python-docx>=1.2,<2
+silero-vad>=5.1

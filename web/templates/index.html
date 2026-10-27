@@ -33,7 +33,29 @@
       <div id="empty-state" class="empty-state"><div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><h3>A place for your words.</h3><p>Add a recording to get started.<br>Your transcript will appear here.</p><span lang="gu" class="gujarati-note">અવાજથી શબ્દો સુધી</span></div>
       <div id="processing" class="processing" hidden aria-live="polite"><span class="spinner" aria-hidden="true"></span><h3 id="status-label">Uploading recording…</h3><p id="status-detail"></p><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div><div class="progress-caption"><span id="progress-description">Preparing your recording</span><span id="progress-percent"></span></div></div>
       <div id="error-state" class="error-state" hidden role="alert"><h3>Couldn’t complete this run</h3><p id="error-message"></p><button id="retry-button" class="secondary" type="button" hidden>Retry & resume</button></div>
-      <div id="result" hidden><div class="result-toolbar"><span class="ready"><i></i> Ready</span><div class="export-actions"><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a></div></div><div id="transcript" class="transcript" tabindex="0"></div><p class="result-note">Review names and technical terms before sharing.</p></div>
+      <div id="result" hidden>
+        <div class="result-toolbar"><span class="ready"><i></i> Ready</span><div class="export-actions"><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a></div></div>
+        <div class="tabs" role="tablist" aria-label="Result views">
+          <button type="button" role="tab" class="tab" id="tab-transcript" data-tab="transcript" aria-selected="true">Transcript</button>
+          <button type="button" role="tab" class="tab" id="tab-translation" data-tab="translation" aria-selected="false">English</button>
+          <button type="button" role="tab" class="tab" id="tab-summary" data-tab="summary" aria-selected="false">Summary</button>
+        </div>
+        <div id="transcript" class="transcript" role="tabpanel" tabindex="0"></div>
+        <div id="translation" class="transcript" role="tabpanel" tabindex="0" hidden></div>
+        <div id="summary" class="transcript summary" role="tabpanel" tabindex="0" hidden></div>
+        <div id="stage-box" class="stage-box" hidden>
+          <p id="stage-explain"></p>
+          <div class="stage-controls">
+            <label class="field-label" for="llm">Run with</label>
+            <select id="llm"><option value="local">Local model · stays on this computer</option><option value="claude">Claude API · sends text to Anthropic</option><option value="gemini">Gemini API · sends text to Google</option></select>
+            <select id="llm-model" aria-label="Local model" hidden></select>
+            <button id="stage-button" class="primary stage-button" type="button">Translate to English</button>
+          </div>
+          <div id="stage-track" class="progress-track" hidden><div id="stage-fill" class="progress-fill"></div></div>
+          <p id="stage-status" class="muted" aria-live="polite"></p>
+        </div>
+        <p class="result-note">Review names and technical terms before sharing. The English and the summary are machine-generated.</p>
+      </div>
     </section>
   </div>
   <footer><span>GUJARATI ASR</span><span>Local audio. Mixed language. Plain text.</span></footer>
