@@ -1,13 +1,8 @@
-"""A small LLM layer for translation and summaries, using only the standard library.
+"""A small Gemini client for translation and summaries, using only the standard library.
 
-Three providers share one `complete(system, user)` interface:
-
-* ``local``: any OpenAI-compatible server on this computer: Ollama (default, port 11434), LM Studio (1234) or
-  ``mlx_lm.server`` (8080). Text never leaves the machine.
-* ``claude``: the Anthropic Messages API. Only transcript *text* (never audio) is sent. The key is read from the
-  ANTHROPIC_API_KEY environment variable and is deliberately not accepted as a command-line argument.
-* ``gemini``: Google's OpenAI-compatible Gemini endpoint. Same text-only rule; the key comes from GEMINI_API_KEY
-  (or GOOGLE_API_KEY).
+Requests go to Google's OpenAI-compatible Gemini endpoint. Only transcript *text* is sent (never audio). The key is
+read from the GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable and is deliberately not accepted as a
+command-line argument, so it never appears in process listings or logs.
 """
 
 from __future__ import annotations
@@ -22,15 +17,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-DEFAULT_LOCAL_URL = "http://localhost:11434/v1"
-DEFAULT_CLAUDE_URL = "https://api.anthropic.com"
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-5-5"
 DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_GEMINI_MODEL = (
     "gemini-3.8-flash"  # override with --llm-model / GUJLISH_GEMINI_MODEL when a newer model is in use
 )
-ANTHROPIC_VERSION = "2023-06-01"
-RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 class LLMError(RuntimeError):
@@ -46,7 +37,7 @@ class Completion:
     truncated: bool = False  # the model stopped because it hit max_tokens
 
 
-RATE_LIMIT_STATUS = {429, 529}  # "slow down": worth waiting longer for than an ordinary server error
+RATE_LIMIT_STATUS = {429}  # "slow down": worth waiting longer for than an ordinary server error
 RATE_LIMIT_RETRIES = 6
 MAX_WAIT_SECONDS = 60.0
 
@@ -82,7 +73,7 @@ def _request(url: str, payload: dict | None, headers: dict, timeout: float, retr
             reason = getattr(error, "reason", error)
             timed_out = isinstance(reason, TimeoutError)
             timeouts += timed_out
-            # A refused connection means nothing is listening (e.g. the local server is not started): fail at once.
+            # A refused connection means nothing is listening: fail at once.
             # A timeout is retried only once: each attempt already waited the full timeout, and a paid API may have
             # processed (and billed) the request anyway.
             if attempt < retries and not isinstance(reason, ConnectionRefusedError) and timeouts <= 1:
@@ -111,7 +102,7 @@ def _message_text(content: object) -> str:
 
 
 def strip_reasoning(text: str) -> str:
-    """Drop <think>…</think> blocks some local models emit before the answer."""
+    """Drop any <think>…</think> reasoning block a model emits before the answer."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
@@ -133,166 +124,23 @@ def parse_json_object(text: str) -> dict:
     return value
 
 
-class LocalLLM:
-    provider = "local"
-    sends_text_off_device = False
-    token_headroom = 0
-    send_temperature = True
-    extra_payload: dict = {}
-
-    def __init__(self, model: str | None = None, base_url: str | None = None, timeout: float = 600.0):
-        self.base_url = (base_url or os.environ.get("GUJLISH_LLM_URL") or DEFAULT_LOCAL_URL).rstrip("/")
-        self.model = model or os.environ.get("GUJLISH_LLM_MODEL") or None
-        self.timeout = timeout
-
-    def _headers(self) -> dict:
-        return {}
-
-    def models(self) -> list[str] | None:
-        """Model ids the server offers, or None when it cannot be reached."""
-        try:
-            data = _request(f"{self.base_url}/models", None, self._headers(), timeout=3.0, retries=0)
-        except LLMError:
-            return None
-        items = data.get("data")
-        return (
-            sorted(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id"))
-            if isinstance(items, list)
-            else []
-        )
-
-    def resolve_model(self) -> str:
-        if self.model:
-            return self.model
-        available = self.models()
-        if available is None:
-            raise LLMError(
-                f"No local LLM server answered at {self.base_url}. Start Ollama (`ollama serve`), LM Studio or "
-                "`mlx_lm.server`, set --llm-url if it uses another port, or use --llm claude."
-            )
-        if len(available) == 1:
-            self.model = available[0]
-            return self.model
-        listing = ", ".join(available) if available else "none"
-        raise LLMError(f"Choose a local model with --llm-model. The server at {self.base_url} offers: {listing}")
-
-    def prepare(self) -> None:
-        self.resolve_model()
-
-    @property
-    def label(self) -> str:
-        return f"local:{self.model or '?'}"
-
-    def describe(self) -> str:
-        return f"local model {self.model or '(auto)'} at {self.base_url}"
-
-    def complete(self, system: str, user: str, *, max_tokens: int = 2048, temperature: float = 0.2) -> Completion:
-        payload = {
-            "model": self.resolve_model(),
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": max_tokens + self.token_headroom,
-            "stream": False,
-            **self.extra_payload,
-        }
-        if self.send_temperature:
-            payload["temperature"] = temperature
-        data = _request(f"{self.base_url}/chat/completions", payload, self._headers(), self.timeout)
-        try:
-            choice = data["choices"][0]
-            text = _message_text(choice["message"]["content"])
-        except (KeyError, IndexError, TypeError):
-            raise LLMError(f"Unexpected response from the local server: {str(data)[:300]}") from None
-        return Completion(strip_reasoning(text), choice.get("finish_reason") == "length")
-
-
-class ClaudeLLM:
-    provider = "claude"
-    sends_text_off_device = True
-
-    def __init__(
-        self,
-        model: str | None = None,
-        base_url: str | None = None,
-        api_key: str | None = None,
-        timeout: float = 300.0,
-    ):
-        self.base_url = (base_url or os.environ.get("ANTHROPIC_BASE_URL") or DEFAULT_CLAUDE_URL).rstrip("/")
-        self.model = model or os.environ.get("GUJLISH_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL
-        self._api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY", "")
-        self.timeout = timeout
-        self._send_temperature = True
-
-    def prepare(self) -> None:
-        if not self._api_key:
-            raise LLMError("Set the ANTHROPIC_API_KEY environment variable to use --llm claude / --summary-llm claude.")
-
-    @property
-    def label(self) -> str:
-        return f"claude:{self.model}"
-
-    def describe(self) -> str:
-        return f"Claude API model {self.model} (transcript text is sent to Anthropic; audio is not)"
-
-    def complete(self, system: str, user: str, *, max_tokens: int = 2048, temperature: float = 0.2) -> Completion:
-        if not self._api_key:
-            raise LLMError("Set the ANTHROPIC_API_KEY environment variable to use --llm claude / --summary-llm claude.")
-        headers = {"x-api-key": self._api_key, "anthropic-version": ANTHROPIC_VERSION}
-        payload = {
-            "model": self.model,
-            "max_tokens": max_tokens,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        }
-        if self._send_temperature:
-            payload["temperature"] = temperature
-        try:
-            data = _request(f"{self.base_url}/v1/messages", payload, headers, self.timeout)
-        except LLMError as error:
-            # Some models fix their own sampling; retry once without the parameter and remember that.
-            if error.status == 400 and "temperature" in error.body.lower() and self._send_temperature:
-                self._send_temperature = False
-                payload.pop("temperature", None)
-                data = _request(f"{self.base_url}/v1/messages", payload, headers, self.timeout)
-            else:
-                raise
-        text = "".join(
-            block.get("text", "")
-            for block in data.get("content", [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-        return Completion(text.strip(), data.get("stop_reason") == "max_tokens")
-
-
-class GeminiLLM(LocalLLM):
-    """Google Gemini through its OpenAI-compatible endpoint. Only transcript text is sent; the key comes from the
-    GEMINI_API_KEY (or GOOGLE_API_KEY) environment variable and is never a command-line argument."""
-
+class GeminiLLM:
     provider = "gemini"
-    sends_text_off_device = True
     token_headroom = 4096  # Gemini's internal reasoning can use the output budget before any answer text appears
-    send_temperature = False  # Google's Gemini 3.8 migration notes say to remove temperature/top_p/top_k
     # Translation needs fluency, not deep reasoning. "low" is the lowest level Gemini 3.x accepts ("minimal" errors);
-    # through the OpenAI-compatible endpoint it maps to thinking_level low.
+    # through the OpenAI-compatible endpoint it maps to thinking_level low. No temperature is sent: Google's
+    # Gemini 3.8 migration notes say to remove temperature/top_p/top_k.
     extra_payload = {"reasoning_effort": "low"}
 
     def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None):
-        super().__init__(
-            model or os.environ.get("GUJLISH_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL,
-            base_url or os.environ.get("GUJLISH_GEMINI_URL") or DEFAULT_GEMINI_URL,
-            timeout=300.0,
-        )
-        self._api_key = api_key if api_key is not None else _gemini_key()
-
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self._api_key}"}
+        self.model = model or os.environ.get("GUJLISH_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+        self.base_url = (base_url or os.environ.get("GUJLISH_GEMINI_URL") or DEFAULT_GEMINI_URL).rstrip("/")
+        self.timeout = 300.0
+        self._api_key = api_key if api_key is not None else gemini_key()
 
     def prepare(self) -> None:
         if not self._api_key:
-            raise LLMError("Set the GEMINI_API_KEY environment variable to use --llm gemini / --summary-llm gemini.")
-
-    def resolve_model(self) -> str:
-        self.prepare()
-        return self.model
+            raise LLMError("Set the GEMINI_API_KEY environment variable to translate and summarize (see the README).")
 
     @property
     def label(self) -> str:
@@ -301,24 +149,29 @@ class GeminiLLM(LocalLLM):
     def describe(self) -> str:
         return f"Gemini API model {self.model} (transcript text is sent to Google; audio is not)"
 
+    def complete(self, system: str, user: str, *, max_tokens: int = 2048, temperature: float = 0.2) -> Completion:
+        """`temperature` is accepted for interface stability but not sent (see the class note)."""
+        self.prepare()
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": max_tokens + self.token_headroom,
+            "stream": False,
+            **self.extra_payload,
+        }
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        data = _request(f"{self.base_url}/chat/completions", payload, headers, self.timeout)
+        try:
+            choice = data["choices"][0]
+            text = _message_text(choice["message"]["content"])
+        except (KeyError, IndexError, TypeError):
+            raise LLMError(f"Unexpected response from Gemini: {str(data)[:300]}") from None
+        return Completion(strip_reasoning(text), choice.get("finish_reason") == "length")
 
-def _gemini_key() -> str:
+
+def gemini_key() -> str:
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
 
 
 def gemini_available() -> bool:
-    return bool(_gemini_key())
-
-
-def claude_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
-
-
-def make_llm(provider: str, model: str | None = None, base_url: str | None = None):
-    if provider == "local":
-        return LocalLLM(model, base_url)
-    if provider == "gemini":
-        return GeminiLLM(model)
-    if provider == "claude":
-        return ClaudeLLM(model)  # endpoint override, if any, comes from ANTHROPIC_BASE_URL
-    raise ValueError(f"Unknown LLM provider {provider!r}")
+    return bool(gemini_key())

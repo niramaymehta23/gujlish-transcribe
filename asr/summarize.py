@@ -20,8 +20,8 @@ from .storage import stage_paths
 from .textutil import escape_tags, fmt_time, parse_time, sha, write_json
 
 PROMPT_VERSION = "summary-v1"
-SECTION_CHARS = {"claude": 16000, "gemini": 16000, "local": 6000}  # source characters per extraction call
-FAN_IN = {"claude": 8, "gemini": 8, "local": 4}  # extractions merged per call
+SECTION_CHARS = 16000  # source characters per extraction call
+FAN_IN = 8  # extractions merged per call
 
 SYSTEM = """You summarize a recording of people speaking. The text you receive is an English translation of Gujarati \
 speech that was recognized automatically, so names, numbers and terms can be wrong. Each line starts with the time \
@@ -294,8 +294,7 @@ def run_summary(
     if not segments:
         raise RuntimeError("The translation has no text to summarize.")
     llm.prepare()
-    provider = llm.provider
-    sections = build_sections(segments, SECTION_CHARS[provider])
+    sections = build_sections(segments, SECTION_CHARS)
     meta = {"prompt_version": PROMPT_VERSION, "llm": llm.label, "text": sha([s["text"] for s in segments])}
     cache_path = paths["summary_json"].with_name(f".{paths['summary_json'].stem}.partial.json")
     cache: dict[str, dict] = {}
@@ -327,10 +326,10 @@ def run_summary(
                 parts.append(cache[key])
                 report(index + 1, total)
             level = 0
-            while len(parts) > FAN_IN[provider]:
+            while len(parts) > FAN_IN:
                 merged = []
-                for group_start in range(0, len(parts), FAN_IN[provider]):
-                    group = parts[group_start : group_start + FAN_IN[provider]]
+                for group_start in range(0, len(parts), FAN_IN):
+                    group = parts[group_start : group_start + FAN_IN]
                     key = f"merge-{level}-{group_start}"
                     if key not in cache:
                         cache[key] = _call_json(llm, _merge_prompt(group, final=False), 4096)

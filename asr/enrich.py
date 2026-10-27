@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .llm import DEFAULT_LOCAL_URL, LLMError, make_llm
+from .llm import DEFAULT_GEMINI_MODEL, GeminiLLM, LLMError
 from .summarize import run_summary
 from .translate import STYLES, load_glossary, run_translation
 
@@ -14,27 +14,13 @@ STAGE_ERRORS = (ImportError, OSError, RuntimeError, ValueError, LLMError, json.J
 
 
 def add_llm_arguments(parser: argparse.ArgumentParser, *, translation: bool = True, summary: bool = True) -> None:
-    group = parser.add_argument_group("Translation and summary")
-    group.add_argument(
-        "--llm",
-        choices=["local", "claude", "gemini"],
-        default="local",
-        help="Where translation (and, by default, the summary) runs. local: an OpenAI-compatible server on this computer (Ollama, LM Studio, "
-        "mlx_lm.server). claude: the Claude API (sends transcript text, not audio, to Anthropic; needs "
-        "ANTHROPIC_API_KEY). gemini: the Gemini API (sends text to Google; needs GEMINI_API_KEY). Default: local",
-    )
+    group = parser.add_argument_group("Translation and summary (Gemini; needs GEMINI_API_KEY)")
     group.add_argument(
         "--llm-model",
-        help="Model id for translation and, by default, the summary (a local model name, or a Claude/Gemini model id)",
+        help=f"Gemini model for translation and, by default, the summary (default {DEFAULT_GEMINI_MODEL})",
     )
-    group.add_argument("--llm-url", help=f"Local server base URL (default {DEFAULT_LOCAL_URL}; env GUJLISH_LLM_URL)")
     if summary:
-        group.add_argument(
-            "--summary-llm",
-            choices=["local", "claude", "gemini"],
-            help="Where the summary runs. Default: the --llm value, so text only leaves the computer if you choose that",
-        )
-        group.add_argument("--summary-model", help="Model id for the summary")
+        group.add_argument("--summary-model", help="Gemini model for the summary, if different")
     if translation:
         group.add_argument(
             "--tone",
@@ -72,9 +58,7 @@ def resolve_transcript(path: Path) -> Path:
 
 
 def summary_llm_for(args):
-    provider = args.summary_llm or args.llm
-    model = args.summary_model or (args.llm_model if provider == args.llm else None)
-    return make_llm(provider, model, args.llm_url)
+    return GeminiLLM(args.summary_model or args.llm_model)
 
 
 def effective_label(args) -> str | None:
@@ -86,7 +70,7 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
     label = effective_label(args)
     translated_by = None
     if translate:
-        llm = make_llm(args.llm, args.llm_model, args.llm_url)
+        llm = GeminiLLM(args.llm_model)
         print(f"Translating with {llm.describe()}", flush=True)
         translated_by = llm.label
         paths = run_translation(
@@ -100,7 +84,7 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
             reset=getattr(args, "reset", False),
             progress=progress,
         )
-        outputs += [paths["translation_txt"], paths["bilingual"], paths["translation_json"]]
+        outputs += [paths["translation_txt"], paths["translation_srt"], paths["bilingual"], paths["translation_json"]]
         if progress:
             progress(
                 {"stage": "complete", "txt": str(paths["translation_txt"]), "json": str(paths["translation_json"])}
@@ -156,7 +140,7 @@ def translate_main() -> None:
     add_llm_arguments(parser, summary=False)
     parser.add_argument("--reset", action="store_true", help="Discard an interrupted translation and start again")
     parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
-    parser.set_defaults(summary_llm=None, summary_model=None)
+    parser.set_defaults(summary_model=None)
     _run(parser, translate=True, summarize=False)
 
 

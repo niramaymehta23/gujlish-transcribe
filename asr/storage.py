@@ -32,6 +32,7 @@ def stage_paths(transcript_json: Path, label: str | None = None) -> dict[str, Pa
     return {
         "translation_txt": folder / f"{stem}.en{tag}.txt",
         "translation_json": folder / f"{stem}.en{tag}.json",
+        "translation_srt": folder / f"{stem}.en{tag}.srt",
         "bilingual": folder / f"{stem}.bilingual{tag}.md",
         "translation_partial": folder / f".{stem}.en{tag}.partial.jsonl",
         "summary_md": folder / f"{stem}.summary{tag}.md",

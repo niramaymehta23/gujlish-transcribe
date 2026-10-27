@@ -17,6 +17,8 @@ Silero VAD sets PyTorch to one thread on import, which would slow CPU inference;
 
 ## Translation: why an LLM with context, not a translation model
 
+*The app now uses Gemini only; local models and Claude were removed. The reasoning below still explains the prompt design.*
+
 Candidates examined:
 
 - **IndicTrans2** (AI4Bharat) and **Sarvam-Translate** (a 4B fine-tune of Gemma 3 covering 22 Indian languages, open weights; its authors say it preserves tone, judged by experts and an LLM judge in their own evaluation) are dedicated translation models: one instruction, no register control, trained largely on written text.
@@ -33,7 +35,7 @@ Behavior that matters:
 
 ## Summary
 
-The English is summarized in sections sized to the model's context (larger for Claude, smaller for local models), then merged in groups. The schema is fixed JSON (overview, themes with points, stories, quotes, asks, names, unclear). The model's times are snapped to actual segment starts, and each quote is checked against the translation text and marked as a paraphrase when it is not found. The summary is not checked against the original Gujarati, so errors in the translation carry through.
+The English is summarized in sections of about 16,000 characters, then merged in groups. The schema is fixed JSON (overview, themes with points, stories, quotes, asks, names, unclear). The model's times are snapped to actual segment starts, and each quote is checked against the translation text and marked as a paraphrase when it is not found. The summary is not checked against the original Gujarati, so errors in the translation carry through.
 
 ## Translation prompt in brief
 

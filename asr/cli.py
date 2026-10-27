@@ -21,6 +21,7 @@ from .guards import check_segment
 from .postprocess import confidence_plot, correct_segments, load_vocabulary, merge_segments
 from .segmenter import split_chunk
 from .storage import TRANSCRIPTS, new_run, run_label, run_paths
+from .subtitles import write_srt
 from .textutil import write_json
 
 CHECKPOINT_VERSION = 3
@@ -189,6 +190,7 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
     }
     text_path.write_text(transcript + "\n", encoding="utf-8")
     write_json(json_path, result)
+    write_srt(json_path.with_suffix(".srt"), segments)
     created_plot = None
     if args.plot:
         plot_path.parent.mkdir(parents=True, exist_ok=True)

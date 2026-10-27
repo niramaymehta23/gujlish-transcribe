@@ -5,7 +5,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from asr.enrich import summary_llm_for
 from asr.llm import Completion, LLMError
@@ -29,9 +28,8 @@ GU = [
 
 
 class FakeLLM:
-    provider = "local"
-    label = "local:fake"
-    sends_text_off_device = False
+    provider = "gemini"
+    label = "gemini:fake"
 
     def __init__(self, reply=None):
         self.calls = []
@@ -153,6 +151,7 @@ class TestRunTranslation(Base):
         self.assertEqual(data["kind"], "translation")
         self.assertEqual(data["segments"][0]["source"], GU[0][0])
         self.assertIn(GU[1][0], paths["bilingual"].read_text())
+        self.assertIn("This is English line 3", paths["translation_srt"].read_text(encoding="utf-8"))
         self.assertEqual(events[-1], {"stage": "translating", "done": 3, "total": 3, "at": 15.0})
         self.assertFalse(list(self.run_dir.glob(".*.partial.jsonl")))
 
@@ -270,18 +269,6 @@ class TestSummary(Base):
         self.assertGreater(len(llm.calls), 3)
         self.assertIn("Combine them into the summary", llm.calls[-1]["user"])
 
-    def test_every_provider_has_summary_settings(self):
-        from asr.summarize import FAN_IN, SECTION_CHARS
-
-        for provider in ("local", "claude", "gemini"):
-            self.assertIn(provider, SECTION_CHARS)
-            self.assertIn(provider, FAN_IN)
-        self.translated()
-        llm = FakeLLM(lambda s, u, n: json.dumps(self.SUMMARY))
-        llm.provider, llm.label = "gemini", "gemini:fake"
-        run_summary(self.transcript, llm)
-        self.assertEqual(len(llm.calls), 1)
-
     def test_resume_reuses_finished_parts(self):
         many = [{"start": i * 10.0, "end": i * 10.0 + 9, "text": "word " * 300} for i in range(14)]
         self.transcript.write_text(json.dumps({"source": "long.wav", "segments": many}), encoding="utf-8")
@@ -312,10 +299,11 @@ class TestSummary(Base):
         self.assertFalse(quote_found("ere was", haystack))
         self.assertFalse(quote_found('""', haystack))
 
-    def test_summary_follows_the_translation_provider_even_with_a_claude_key(self):
-        args = argparse.Namespace(summary_llm=None, summary_model=None, llm="local", llm_model="m", llm_url=None)
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test"}):
-            self.assertEqual(summary_llm_for(args).provider, "local")
+    def test_summary_uses_the_translation_model_unless_told_otherwise(self):
+        args = argparse.Namespace(summary_model=None, llm_model="gemini-a")
+        self.assertEqual(summary_llm_for(args).model, "gemini-a")
+        args.summary_model = "gemini-b"
+        self.assertEqual(summary_llm_for(args).model, "gemini-b")
 
     def test_finalize_tolerates_malformed_model_output(self):
         segments = [{"start": 0.0, "end": 5.0, "text": "hello world"}, {"start": 60.0, "end": 65.0, "text": "bye"}]

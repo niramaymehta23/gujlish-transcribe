@@ -18,9 +18,9 @@ The deployment therefore offers only **Gujlish** (Apache 2.0) by default. Add Fl
 | Visitors see only their own runs | Always | — |
 | Upload size limit | 300 MB | `GUJLISH_MAX_UPLOAD_MB` |
 | Recording length limit | 90 minutes | `GUJLISH_MAX_MINUTES` |
-| Recordings and results deleted | After 24 hours (the bucket also deletes anything older than 2 days) | `GUJLISH_RETENTION_HOURS` |
+| Recordings and results deleted | Never: kept in your bucket until you delete them | `GUJLISH_RETENTION_HOURS` |
 | One recording in progress per visitor | Always | — |
-| Translation and summaries | Off: Claude and Gemini would run on your API key | `GUJLISH_ALLOW_CLOUD_LLM=1` plus a key (see below) |
+| Translation and summaries | On when a Gemini key is stored (setup asks for it); Gemini runs on your API key | `GUJLISH_ALLOW_GEMINI` |
 | Large uploads | Sent in 8 MB pieces, because Cloud Run caps one request at 32 MB | — |
 
 Visitors are told apart by a signed cookie. Someone who clears their cookies or switches browsers no longer sees their earlier runs.
@@ -60,20 +60,9 @@ Main Cloud Run settings, all in `deploy/deploy.sh`:
 
 You pay for the GPU instance while it runs: while it works, and for a short idle period afterwards before it scales to zero. Smaller charges cover storage, builds and the image repository. Check current rates on Google's [Cloud Run pricing page](https://cloud.google.com/run/pricing) for your region. As a rough guide, an L4 GPU instance costs on the order of a dollar per hour while running.
 
-## Optional: translation and summaries online
+## Translation and summaries online
 
-To let visitors translate and summarize with Gemini or Claude on **your** API key:
-
-1. Store the key as a secret and allow the service to read it, for example:
-   ```bash
-   printf '%s' "$GEMINI_API_KEY" | gcloud secrets create gujlish-gemini-key --data-file=-
-   gcloud secrets add-iam-policy-binding gujlish-gemini-key \
-     --member "serviceAccount:$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')-compute@developer.gserviceaccount.com" \
-     --role roles/secretmanager.secretAccessor
-   ```
-2. Add `GUJLISH_ALLOW_CLOUD_LLM=1` to `--set-env-vars` and `GEMINI_API_KEY=gujlish-gemini-key:latest` to the secrets in `deploy/deploy.sh`, then deploy again.
-
-Keep the site password on if you do this, and set a spending limit on the API key itself.
+`deploy/setup.sh` asks for a Gemini API key (pressing Enter keeps the one already stored). When a key is stored, `deploy/deploy.sh` gives it to the service from Secret Manager and switches translation on. Keep the site password on, and set a spending limit on the key.
 
 ## Known limitations
 
