@@ -19,11 +19,14 @@ def add_llm_arguments(parser: argparse.ArgumentParser, *, translation: bool = Tr
         "--llm",
         choices=["local", "claude", "gemini"],
         default="local",
-        help="Where translation runs. local: an OpenAI-compatible server on this computer (Ollama, LM Studio, "
+        help="Where translation (and, by default, the summary) runs. local: an OpenAI-compatible server on this computer (Ollama, LM Studio, "
         "mlx_lm.server). claude: the Claude API (sends transcript text, not audio, to Anthropic; needs "
         "ANTHROPIC_API_KEY). gemini: the Gemini API (sends text to Google; needs GEMINI_API_KEY). Default: local",
     )
-    group.add_argument("--llm-model", help="Model id for translation (a local model name, or a Claude/Gemini model id)")
+    group.add_argument(
+        "--llm-model",
+        help="Model id for translation and, by default, the summary (a local model name, or a Claude/Gemini model id)",
+    )
     group.add_argument("--llm-url", help=f"Local server base URL (default {DEFAULT_LOCAL_URL}; env GUJLISH_LLM_URL)")
     if summary:
         group.add_argument(
@@ -104,7 +107,7 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
             )
     if summarize:
         llm = summary_llm_for(args)
-        print(f"Summarising with {llm.describe()}", flush=True)
+        print(f"Summarizing with {llm.describe()}", flush=True)
         paths = run_summary(
             transcript_json,
             llm,
@@ -159,7 +162,7 @@ def translate_main() -> None:
 
 def summarize_main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarise a translated recording: overview, main points by theme, stories, quotes"
+        description="Summarize a translated recording: overview, main points by theme, stories, quotes"
     )
     parser.add_argument(
         "transcript", type=Path, help="The <name>.<model>.json file of a transcription run, or its folder"

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Local Gujarati ASR CLI."""
+"""Local Gujarati Transcriber CLI."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from .asr_backends import choose_device, load_backend
@@ -21,16 +20,11 @@ from .enrich import STAGE_ERRORS, add_llm_arguments, run_stages
 from .guards import check_segment
 from .postprocess import confidence_plot, correct_segments, load_vocabulary, merge_segments
 from .segmenter import split_chunk
-from .storage import TRANSCRIPTS, new_run, run_paths
+from .storage import TRANSCRIPTS, new_run, run_label, run_paths
+from .textutil import write_json
 
 CHECKPOINT_VERSION = 3
 RETRY_FLAGS = {"repetition", "too_dense"}
-
-
-def _write_json(path: Path, value: dict) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def _metadata(source: Path, args, device: str, detector_name: str | None) -> dict:
@@ -90,16 +84,15 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
         raise ValueError("--mode applies only to the flex backend")
     if args.plot and args.model != "gujlish":
         raise ValueError("--plot is available only for the gujlish CTC backend")
-    if getattr(args, "vad", False):
-        print("Note: --vad is now built in; pause-aware chunking is the default (see --chunking).", flush=True)
     vocabulary = load_vocabulary(args.vocab.expanduser().resolve()) if args.vocab else None
     device = choose_device(args.device)
     detector = load_detector(args.detector) if args.chunking == "pause" else None
     metadata = _metadata(source, args, device, detector.name if detector else None)
     run_dir = getattr(args, "output_dir", None)
     if run_dir is None and not args.reset:
-        label = args.model + (f"-{args.mode}" if args.model == "flex" else "")
-        candidates = sorted((TRANSCRIPTS / source.stem / label).glob("*/.*.partial.json"), reverse=True)
+        candidates = sorted(
+            (TRANSCRIPTS / source.stem / run_label(args.model, args.mode)).glob("*/.*.partial.json"), reverse=True
+        )
         for candidate in candidates:
             try:
                 if json.loads(candidate.read_text(encoding="utf-8")).get("metadata") == metadata:
@@ -157,7 +150,7 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
             segment = _decode_chunk(backend, chunk, args.mode)
         segment["overlap"] = chunk.overlap
         segments.append(segment)
-        _write_json(checkpoint_path, {"metadata": metadata, "segments": segments})
+        write_json(checkpoint_path, {"metadata": metadata, "segments": segments})
         notify("transcribing", processed=chunk.end, chunks=index + 1)
 
     if not chunk_count:
@@ -191,7 +184,7 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
         "segments": segments,
     }
     text_path.write_text(transcript + "\n", encoding="utf-8")
-    _write_json(json_path, result)
+    write_json(json_path, result)
     created_plot = None
     if args.plot:
         plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["pause", "fixed"],
         default="pause",
         help="pause: cut at the speaker's pauses, trim silence and skip chunks without speech (default). "
-        "fixed: the original fixed 27.5 s cuts with overlap, for comparison",
+        "fixed: the original fixed-length cuts with overlap, for comparison",
     )
     parser.add_argument(
         "--detector",
@@ -232,7 +225,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Speech detector for --chunking pause: Silero VAD when installed, else a simple energy gate",
     )
-    parser.add_argument("--vad", action="store_true", help=argparse.SUPPRESS)  # superseded by --chunking pause
     parser.add_argument(
         "--denoise", action="store_true", help="Apply FFmpeg's lightweight noise filter to the decoded stream"
     )

@@ -1,5 +1,6 @@
-"""A local upload server with one ASR subprocess at a time."""
+"""A local upload server that runs one worker subprocess at a time (transcribe, translate or summarize)."""
 
+import hashlib
 import json
 import re
 import subprocess
@@ -14,10 +15,11 @@ from uuid import uuid4
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
-from asr.llm import DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, LocalLLM, claude_available, gemini_available
+from asr.llm import LocalLLM, claude_available, gemini_available
 from asr.storage import RECORDINGS, ROOT, TRANSCRIPTS, new_run, stage_paths
 
 MODEL_ID = re.compile(r"[\w.:/@+-]{1,200}")
+LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
 
 
 def probe_audio(path: Path) -> float | None:
@@ -138,7 +140,7 @@ def create_app(*, executor=None) -> Flask:
             ) as worker:
                 for line in worker.stdout:
                     logs.append(line.strip())
-                    logs = logs[-12:]
+                    logs = logs[-LOG_TAIL_LINES:]
                     if line.startswith("ASR_EVENT "):
                         event = json.loads(line[len("ASR_EVENT ") :])
                         if event["stage"] == "transcribing":
@@ -167,7 +169,9 @@ def create_app(*, executor=None) -> Flask:
         except Exception as error:
             update(job_id, status="error", message=str(error))
 
-    STAGE_WORDS = {"translation": "Translating", "summary": "Summarising"}
+    # Each English stage goes by several names: job key "translation" / "summary", URL /translate / /summarize,
+    # script translate.py / summarize.py, and progress event "translating" / "summarizing".
+    STAGE_WORDS = {"translation": "Translating", "summary": "Summarizing"}
 
     def set_stage(job_id, key, **fields):
         with lock:
@@ -183,7 +187,7 @@ def create_app(*, executor=None) -> Flask:
             ) as worker:
                 for line in worker.stdout:
                     logs.append(line.strip())
-                    logs = logs[-12:]
+                    logs = logs[-LOG_TAIL_LINES:]
                     if line.startswith("ASR_EVENT "):
                         event = json.loads(line[len("ASR_EVENT ") :])
                         if event["stage"] in {"translating", "summarizing"} and event["total"]:
@@ -303,13 +307,11 @@ def create_app(*, executor=None) -> Flask:
 
     @app.get("/api/capabilities")
     def capabilities():
-        # What the translation/summary stages can use right now. The Claude key is read from the environment only.
+        # What the translation/summary stages can use right now. API keys are read from the environment only.
         local = LocalLLM()
         return jsonify(
             claude=claude_available(),
             gemini=gemini_available(),
-            claude_model=DEFAULT_CLAUDE_MODEL,
-            gemini_model=DEFAULT_GEMINI_MODEL,
             local_url=local.base_url,
             local_models=local.models(),
         )
@@ -332,7 +334,7 @@ def create_app(*, executor=None) -> Flask:
             if job.get("status") != "complete" or not job.get("json"):
                 return jsonify(error="Finish the transcript first."), 409
             if key == "summary" and stage_view(job, "translation")["status"] != "complete":
-                return jsonify(error="Translate the transcript before summarising it."), 409
+                return jsonify(error="Translate the transcript before summarizing it."), 409
             if (job.get(key) or {}).get("status") in {"queued", "running"}:
                 return jsonify(error="This step is already running."), 409
             job[key] = {
@@ -422,8 +424,6 @@ def create_app(*, executor=None) -> Flask:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("kind"):  # translation/summary files share the folder but are not transcripts
                     continue
-                import hashlib
-
                 job_id = hashlib.sha256(str(path).encode()).hexdigest()[:32]
                 record = {
                     "id": job_id,

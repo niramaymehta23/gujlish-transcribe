@@ -1,6 +1,6 @@
-"""Cheap sanity checks on recogniser output.
+"""Cheap sanity checks on recognizer output.
 
-Sequence-to-sequence recognisers can loop on a phrase or emit far more (or less) text than the audio holds. These
+Sequence-to-sequence recognizers can loop on a phrase or emit far more (or less) text than the audio holds. These
 checks only *flag* a segment so it can be re-decoded and shown to the reader. They never edit or delete text:
 chanting and deliberate repetition are legitimate speech.
 

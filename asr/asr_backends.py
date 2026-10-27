@@ -1,4 +1,7 @@
-"""Small wrappers around the two supported ASR models."""
+"""Small wrappers around the two supported ASR models.
+
+Environment variables starting with GUJLISH_ belong to this project (its working name), not to the Gujlish model.
+"""
 
 from __future__ import annotations
 
@@ -33,11 +36,13 @@ def choose_device(requested: str) -> str:
 
 
 class FlexBackend:
+    """Default model (Bodhan Indic-Transcribe Flex): mixed or native script output, no confidence scores."""
+
     def __init__(self, device: str):
         from huggingface_hub import snapshot_download
 
         # The Flex wrapper is Python code from the model repository and is executed below. Set
-        # GUJLISH_FLEX_REVISION to a commit hash you have reviewed to stop upstream changes from altering behaviour.
+        # GUJLISH_FLEX_REVISION to a commit hash you have reviewed to stop upstream changes from altering behavior.
         revision = os.environ.get("GUJLISH_FLEX_REVISION") or None
         model_dir = Path(snapshot_download(FLEX_REPO, ignore_patterns=["nemo/*"], revision=revision))
         sys.path.insert(0, str(model_dir))
@@ -66,6 +71,8 @@ class _Token:
 
 
 class GujlishBackend:
+    """Comparison model (WhissleAI wav2vec2 CTC): Gujlish output with per-word timings and probabilities."""
+
     def __init__(self, device: str):
         import json
 
@@ -88,6 +95,7 @@ class GujlishBackend:
         return " " if token == "|" else str(token)
 
     def transcribe(self, samples: np.ndarray, start: float, end: float, mode: str) -> dict:
+        # `mode` is accepted for interface parity with FlexBackend; this model has a single output script.
         torch = self.torch
         input_values = torch.from_numpy(samples).unsqueeze(0).to(self.device)
         with torch.inference_mode():

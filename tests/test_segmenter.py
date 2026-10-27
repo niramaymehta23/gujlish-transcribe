@@ -159,7 +159,7 @@ class TestDetectorAndChunks(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertFalse(chunks[0].speech)
 
-    def test_fixed_mode_is_the_original_behaviour(self):
+    def test_fixed_mode_is_the_original_behavior(self):
         path = self.root / "tone.wav"
         write_wav(path, [(35, True)])
         chunks = list(audio_chunks(path, chunk_seconds=27.5, chunking="fixed", detector=None))

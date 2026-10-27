@@ -197,7 +197,7 @@ class TestRunTranslation(Base):
         paths = run_translation(self.transcript, llm, limit=1)
         self.assertIn("unclear", json.loads(paths["translation_json"].read_text())["segments"][0]["flags"])
 
-    def test_limit_writes_a_labelled_sample_and_leaves_the_real_outputs_alone(self):
+    def test_limit_writes_a_labeled_sample_and_leaves_the_real_outputs_alone(self):
         paths = run_translation(self.transcript, FakeLLM(), limit=2)
         self.assertIn("sample", paths["translation_txt"].name)
         self.assertTrue(json.loads(paths["translation_json"].read_text())["sample"])
@@ -221,7 +221,7 @@ class TestSummary(Base):
         return run_translation(self.transcript, llm or FakeLLM())
 
     def test_requires_a_translation_first(self):
-        with self.assertRaisesRegex(RuntimeError, "Translate the transcript first"):
+        with self.assertRaisesRegex(RuntimeError, "No translation found"):
             run_summary(self.transcript, FakeLLM())
 
     def test_single_call_summary_and_verification(self):
@@ -302,7 +302,7 @@ class TestSummary(Base):
         self.assertEqual(sections[0][0], 0)
         empty = finalize({}, segments)
         self.assertIn(
-            "# Recording summary", render_markdown(empty, name="n", duration=10, translated_by="a", summarised_by="b")
+            "# Recording summary", render_markdown(empty, name="n", duration=10, translated_by="a", summarized_by="b")
         )
 
 

@@ -1,4 +1,4 @@
-"""Regression tests for output organisation, resume and web exports."""
+"""Regression tests for output organization, resume and web exports."""
 
 import io
 import json
@@ -8,18 +8,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from helpers import DeferredExecutor
+
 from asr.cli import build_parser, run
 from asr.storage import new_run, run_paths
 from evaluate import error_rate
 from web.server import create_app, transcript_docx
-
-
-class DeferredExecutor:
-    def __init__(self):
-        self.tasks = []
-
-    def submit(self, function, *args):
-        self.tasks.append((function, args))
 
 
 class TestWorkflow(unittest.TestCase):
@@ -48,7 +42,11 @@ class TestWorkflow(unittest.TestCase):
 
     def test_resume_outputs_and_overlap(self):
         output = self.root / "transcripts" / "run"
-        args = build_parser().parse_args([str(self.source), "flex", "--device", "cpu", "--output-dir", str(output)])
+        # Silero (if installed) treats a sine tone as non-speech and would skip every chunk; fixed chunking keeps the
+        # two chunks this test relies on regardless of which detector is installed.
+        args = build_parser().parse_args(
+            [str(self.source), "flex", "--device", "cpu", "--chunking", "fixed", "--output-dir", str(output)]
+        )
 
         class Backend:
             def __init__(self):

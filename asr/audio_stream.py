@@ -31,9 +31,9 @@ __all__ = [
     "require_ffmpeg",
 ]
 
-CHUNK_SECONDS = 27.5
-OVERLAP_SECONDS = 0.4
-GUJLISH_CHUNK_SECONDS = 15.5
+CHUNK_SECONDS = 27.5  # Flex decodes up to ~30 s windows; keep headroom
+OVERLAP_SECONDS = 0.4  # shared audio on forced cuts so a word split at the edge is heard in full by one chunk
+GUJLISH_CHUNK_SECONDS = 15.5  # Gujlish was trained on clips of at most 16 s
 READ_BYTES = 128 * 1024
 
 
@@ -127,7 +127,7 @@ def audio_chunks(
 
     chunking="pause": cut at the latest usable pause, trim edge silence, and yield silent chunks with
     speech=False (so chunk indexes stay stable for checkpoint resume). Overlap is kept only for forced cuts.
-    chunking="fixed": the original behaviour: fixed cuts with a 0.4 s overlap and no trimming.
+    chunking="fixed": the original behavior: fixed cuts with a 0.4 s overlap and no trimming.
     """
     if chunking not in {"pause", "fixed"}:
         raise ValueError(f"Unknown chunking mode {chunking!r}")
