@@ -226,5 +226,6 @@ The code in this repository is [MIT licensed](LICENSE). The speech models are no
 - [**Indic-Transcribe Flex**](https://huggingface.co/bodhan-ai/indic-transcribe-flex) by Bodhan AI, under the Bodhan AI Open Model License. Running it on your own computer is permitted; hosting it as a service for other people requires Bodhan AI's approval, so read its license before doing that.
 - [**Gujlish Wav2Vec2**](https://huggingface.co/WhissleAI/speech-tagger_gujlish_wav2vec2_meta) by WhissleAI, under Apache 2.0.
 - Built on FFmpeg, PyTorch, Hugging Face Transformers, Silero VAD, Flask and python-docx.
+- AI-assisted coding used.
 
 Transcripts, translations and summaries are machine-generated. Check names, numbers and quotes before sharing them.
