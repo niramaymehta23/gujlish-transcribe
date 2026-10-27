@@ -1,12 +1,12 @@
 # Gujarati Transcriber
 
-Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary.
+Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary, using Google's Gemini (needs your own Gemini API key; see [step 6](#translate-to-english-and-summarize-optional)).
 
 - **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
-- **Runs locally.** Your recordings stay on your computer. Nothing is uploaded unless you choose a cloud model for translation.
+- **Runs locally.** Transcription happens on your computer and your audio never leaves it. Only if you translate is the transcript *text* sent to Gemini.
 - **Browser app and command line.** Drop a file into the web page, or script it from the terminal.
 - **Handles long recordings.** Audio is cut at natural pauses, and an interrupted run picks up where it stopped.
-- **Exports.** Copy the text or download TXT and DOCX.
+- **Exports.** Copy the text or download TXT, DOCX, or SRT subtitles with timestamps, for both the transcript and the English translation.
 
 ## Contents
 
@@ -96,12 +96,12 @@ Then:
 1. **Add a recording.** Drop it on the page or click to choose a file. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV).
 2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can be *Mixed* (Gujarati script plus English in English letters, the default) or *Native* (everything in Gujarati script). **Gujlish** is a smaller comparison model.
 3. **Click Transcribe recording.** The progress bar follows the audio processed so far. The first run also waits for the model to download and load.
-4. **Read, copy or download** the transcript as TXT or DOCX.
+4. **Read, copy or download** the transcript as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
 5. **Optional:** open the **English** and **Summary** tabs to translate and summarize (see [below](#translate-to-english-and-summarize-optional)).
 
 **Previous runs** on the left reopens earlier transcripts, even after restarting the app. If a run fails or you stop it, **Retry & resume** continues from the last finished chunk instead of starting over.
 
-Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`. Neither folder is ever uploaded to GitHub.
+Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Neither folder is ever uploaded to GitHub.
 
 **Fully offline:** once the model has downloaded, start the app with `HF_HUB_OFFLINE=1 python app.py` and it never contacts Hugging Face.
 
@@ -116,7 +116,7 @@ python transcribe.py recordings/talk.m4a gujlish                # comparison mod
 python transcribe.py recordings/talk.m4a gujlish --plot         # plus a confidence chart
 ```
 
-The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.txt`, with a matching `.json` that has timings. Running the same command again after an interruption resumes it; add `--reset` to start fresh.
+The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.txt`, with `talk.flex.srt` (subtitles) and a `.json` that has timings. Running the same command again after an interruption resumes it; add `--reset` to start fresh.
 
 | Option | What it does |
 | --- | --- |
@@ -134,44 +134,42 @@ The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.tx
 
 ## Translate to English and summarize (optional)
 
-After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. You choose where this runs:
+After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. This uses **Google's Gemini** and needs your own Gemini API key. Without a key, transcription still works; only the English and Summary tabs stay off.
 
-| Option | Privacy | Cost | What you need |
-| --- | --- | --- | --- |
-| **A local model** | Nothing leaves your computer | Free | [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) and a downloaded model |
-| **Gemini** | Transcript text (never audio) goes to Google | Pay per use, usually well under $1 per long recording | A Gemini API key |
-| **Claude** | Transcript text (never audio) goes to Anthropic | Pay per use | An Anthropic API key |
+**Privacy and cost:** only the transcript *text* is sent to Google, never the audio. Gemini charges per use; at Google's published prices a long recording usually costs well under a dollar. Check Google's data-use terms for your key's tier before sending private recordings.
 
-### Using a local model (Ollama)
+### 1. Get a Gemini API key (one time)
 
-1. Install Ollama from [ollama.com](https://ollama.com) and open it.
-2. Download a model: `ollama pull <model-name>`. No benchmark covers spoken Gujarati-to-English yet, so try a few on your own audio. Good candidates on a 16–18 GB Mac are TranslateGemma (4B or 12B), Sarvam-Translate (4B) and general 12–14B instruction models.
-3. Start the transcriber as usual. In the **English** tab, choose **Local model**, pick the model from the list, and click **Translate to English**. Then open **Summary** and click **Summarize**.
+1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey) and sign in with your Google account.
+2. Click **Create API key** and copy it. Treat it like a password: don't share it, and never put it in any file in this project.
+3. Optional but recommended: in Google AI Studio or Google Cloud Billing, set a spending limit or budget alert for the key.
 
-### Using Gemini or Claude
+### 2. Give the key to the app
 
-API keys are read only from your terminal's environment, never typed into the web page. Set the key in the terminal, then start the app from that same terminal:
+The key is read only from your terminal's environment, never typed into the web page. In the terminal where you start the app:
 
 ```bash
-export GEMINI_API_KEY="your-key"         # from aistudio.google.com/apikey
-# or
-export ANTHROPIC_API_KEY="your-key"      # from console.anthropic.com
+read -rs GEMINI_API_KEY && export GEMINI_API_KEY     # paste the key and press Enter (nothing shows)
 python app.py
 ```
 
-Gemini or Claude then becomes selectable in the **English** tab. Check your provider's data-use terms before sending private recordings.
+This lasts until you close that terminal. To avoid repeating it, add `export GEMINI_API_KEY="your-key"` to your shell's startup file (`~/.zshrc` on a Mac), knowing that the key is then stored there in plain text.
+
+### 3. Translate and summarize
+
+Open a finished transcript, go to the **English** tab and click **Translate to English**. Then open **Summary** and click **Summarize**. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
 
 ### From the command line
 
 ```bash
-python transcribe.py recordings/talk.m4a flex --translate --summarize --llm-model <model-name>
-python translate.py transcripts/talk/flex-mixed/<date-time>/ --llm gemini     # translate an existing run
-python summarize.py transcripts/talk/flex-mixed/<date-time>/ --llm gemini     # then summarize it
+python transcribe.py recordings/talk.m4a flex --translate --summarize     # all in one go
+python translate.py transcripts/talk/flex-mixed/<date-time>/             # translate an existing run
+python summarize.py transcripts/talk/flex-mixed/<date-time>/             # then summarize it
 ```
 
-Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.flex.bilingual.md` (Gujarati and English side by side) and `talk.flex.summary.md`.
+Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.flex.en.srt` (English subtitles), `talk.flex.bilingual.md` (Gujarati and English side by side) and `talk.flex.summary.md`.
 
-Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--limit 15 --label test` to try a model on the first 15 segments without touching the full output. The summary uses the same provider as the translation unless you pass `--summary-llm`.
+Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
 
 ## Troubleshooting
 
@@ -185,7 +183,7 @@ Useful options: `--tone faithful` for a closer, plainer translation; `--style-no
 | "Address already in use" | Another copy is running. Stop it, or use `python app.py --port 8766`. |
 | Very slow | The first run downloads and loads the model. Without an Apple or NVIDIA GPU, transcription runs on the CPU and takes much longer. |
 | A quiet recording comes out empty | Try `--chunking fixed` on the command line, which doesn't rely on detecting speech. |
-| "No local model server found" in the English tab | Start Ollama or LM Studio and download a model, or use Gemini or Claude. |
+| The English tab says to set `GEMINI_API_KEY` | Stop the app, set the key in that terminal (see [step 2](#2-give-the-key-to-the-app)), and start it again. |
 
 ## Project layout
 

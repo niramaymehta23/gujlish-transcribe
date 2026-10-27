@@ -12,13 +12,11 @@ gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregi
 gcloud artifacts repositories describe "$REPO" --location "$REGION" >/dev/null 2>&1 ||
   gcloud artifacts repositories create "$REPO" --repository-format docker --location "$REGION"
 
-# Recordings and transcripts. The app deletes runs after 24 hours; this lifecycle rule is a backstop.
+# Recordings and transcripts. They are kept until you delete them (no automatic deletion).
 if ! gcloud storage buckets describe "gs://$BUCKET" >/dev/null 2>&1; then
   gcloud storage buckets create "gs://$BUCKET" --location "$REGION" --uniform-bucket-level-access
 fi
-printf '{"rule":[{"action":{"type":"Delete"},"condition":{"age":2}}]}' >/tmp/gujlish-lifecycle.json
-gcloud storage buckets update "gs://$BUCKET" --lifecycle-file /tmp/gujlish-lifecycle.json
-rm -f /tmp/gujlish-lifecycle.json
+gcloud storage buckets update "gs://$BUCKET" --clear-lifecycle >/dev/null
 
 secret() {  # secret NAME VALUE: create or add a new version, without echoing the value
   if gcloud secrets describe "$1" >/dev/null 2>&1; then
@@ -27,21 +25,23 @@ secret() {  # secret NAME VALUE: create or add a new version, without echoing th
     printf '%s' "$2" | gcloud secrets create "$1" --data-file=- --replication-policy automatic
   fi
 }
-read -rsp "Hugging Face read token (input hidden): " hf_token; echo
-read -rsp "Password people will use to open the site (input hidden, blank = no password): " password; echo
-secret gujlish-hf-token "$hf_token"
-if [[ -n "$password" ]]; then
-  secret gujlish-password "$password"
-else
-  gcloud secrets delete gujlish-password --quiet >/dev/null 2>&1 || true
+ask() {  # ask NAME PROMPT: hidden prompt; blank keeps the stored value when there is one
+  local value keep=""
+  gcloud secrets describe "$1" >/dev/null 2>&1 && keep=" (blank = keep the current one)"
+  read -rsp "$2$keep: " value; echo
+  if [[ -n "$value" ]]; then secret "$1" "$value"; elif [[ -z "$keep" ]]; then return 1; fi
+}
+ask gujlish-hf-token "Hugging Face read token (input hidden)" || { echo "A Hugging Face token is required."; exit 1; }
+ask gujlish-password "Password for opening the site (input hidden)" ||
   echo "No password: anyone with the link can use the site."
-fi
+ask gujlish-gemini-key "Gemini API key for translation and summaries (input hidden)" ||
+  echo "No Gemini key: translation and summaries stay off on the site."
 gcloud secrets describe gujlish-secret-key >/dev/null 2>&1 || secret gujlish-secret-key "$(openssl rand -hex 32)"
 
 # The default compute service account runs both the build and the service in new projects.
 number=$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')
 account="${number}-compute@developer.gserviceaccount.com"
-for name in gujlish-hf-token gujlish-password gujlish-secret-key; do
+for name in gujlish-hf-token gujlish-password gujlish-gemini-key gujlish-secret-key; do
   gcloud secrets describe "$name" >/dev/null 2>&1 || continue
   gcloud secrets add-iam-policy-binding "$name" --member "serviceAccount:$account" \
     --role roles/secretmanager.secretAccessor >/dev/null

@@ -102,6 +102,7 @@ class TestWorkflow(unittest.TestCase):
             txt, data, plot = run(args, events.append)
         self.assertEqual(txt.name, "interview.flex.txt")
         self.assertEqual(txt.read_text().strip(), "આજે machine learning વિશે વાત કરીશું")
+        self.assertIn("00:00:00,000 --> ", txt.with_suffix(".srt").read_text(encoding="utf-8"))
         self.assertEqual(len(json.loads(data.read_text())["segments"]), 2)
         self.assertFalse(checkpoint.exists())
         self.assertIsNone(plot)
