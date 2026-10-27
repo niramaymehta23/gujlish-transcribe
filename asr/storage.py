@@ -1,12 +1,15 @@
 """Automatic, recording-based run paths shared by the CLI and web app."""
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORDINGS = ROOT / "recordings"
-TRANSCRIPTS = ROOT / "transcripts"
-PLOTS = ROOT / "plots"
+# Recordings and outputs live under the project by default; a hosted deployment points this at mounted storage.
+DATA = Path(os.environ.get("GUJLISH_DATA_DIR") or ROOT)
+RECORDINGS = DATA / "recordings"
+TRANSCRIPTS = DATA / "transcripts"
+PLOTS = DATA / "plots"
 
 
 def run_label(model: str, mode: str) -> str:

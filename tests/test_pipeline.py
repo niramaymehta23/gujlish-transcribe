@@ -142,7 +142,7 @@ class TestWorkflow(unittest.TestCase):
     def test_upload_collision_validation_and_downloads(self):
         executor = DeferredExecutor()
         with (
-            patch("web.server.RECORDINGS", self.root / "recordings"),
+            patch("asr.storage.RECORDINGS", self.root / "recordings"),
             patch("asr.storage.TRANSCRIPTS", self.root / "transcripts"),
         ):
             app = create_app(executor=executor)
@@ -212,7 +212,7 @@ class TestWorkflow(unittest.TestCase):
                 json.dumps({"source": f"{name}.wav", "model": "flex", "mode": "mixed", "duration": 3.0}),
                 encoding="utf-8",
             )
-        with patch("web.server.TRANSCRIPTS", root):
+        with patch("asr.storage.TRANSCRIPTS", root):
             client = create_app(executor=DeferredExecutor()).test_client()
             history = client.get("/api/history").json
             self.assertEqual([entry["name"] for entry in history], ["a_new.wav", "z_old.wav"])

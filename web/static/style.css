@@ -19,3 +19,4 @@
 .stage-button{margin:0;width:auto;height:36px;padding:0 14px;justify-content:center}
 .stage-button:disabled{opacity:.5;cursor:not-allowed}
 .stage-box .progress-track{margin-top:14px}
+.login{max-width:380px;padding-top:70px}.login h1{font-size:32px;letter-spacing:-1px}.login p{color:var(--muted);line-height:1.6}.login input{width:100%;height:42px;padding:0 12px;border:1px solid #d3d9ce;border-radius:5px;font:inherit;background:transparent;color:var(--ink)}.login-error{color:#914a41!important;margin:10px 0 0}

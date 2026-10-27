@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gujarati Transcriber · Local transcription</title>
+  <title>Gujarati Transcriber · {{ "Online" if hosted else "Local" }} transcription</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
-<body>
-<header class="topbar"><a class="brand" href="/" aria-label="Gujarati Transcriber home"><span class="brand-mark" lang="gu">અ</span>Gujarati Transcriber</a><span class="local"><i></i> Local workspace</span></header>
+<body data-hosted="{{ 1 if hosted else 0 }}" data-chunk-bytes="{{ chunk_bytes }}" data-max-upload-mb="{{ max_upload_mb }}">
+<header class="topbar"><a class="brand" href="/" aria-label="Gujarati Transcriber home"><span class="brand-mark" lang="gu">અ</span>Gujarati Transcriber</a><span class="local"><i></i> {{ "Online workspace" if hosted else "Local workspace" }}</span></header>
 <main>
   <div class="intro"><p class="eyebrow">AUDIO → TEXT</p><h1>Your recording.<br>Your words.</h1><p>Transcribe Gujarati and English, together.</p></div>
   <div class="workspace">
@@ -19,12 +19,12 @@
           <svg viewBox="0 0 32 32" width="36" height="36" aria-hidden="true"><path d="M16 22V5m-6 6 6-6 6 6M6 22v5h20v-5"/></svg>
           <strong id="file-name">Drop an audio file here</strong><span id="file-detail">or click to choose a file</span>
         </label>
-        <p class="formats">M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM<br>Also accepts audio tracks from video. Up to 4 GB.</p>
+        <p class="formats">M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM<br>Also accepts audio tracks from video. Up to {{ upload_limit }}{% if max_minutes %}, {{ max_minutes }} minutes{% endif %}.</p>
         <label class="field-label" for="model">Transcription model</label>
-        <select name="model" id="model"><option value="flex">Flex · Gujarati + English</option><option value="gujlish">Gujlish · CTC comparison</option></select>
-        <div id="mode-field"><label class="field-label" for="mode">Output script</label><select name="mode" id="mode"><option value="mixed">Mixed · Gujarati + Latin English</option><option value="native">Native · Gujarati script</option></select></div>
+        <select name="model" id="model">{% if "flex" in models %}<option value="flex">Flex · Gujarati + English</option>{% endif %}{% if "gujlish" in models %}<option value="gujlish">Gujlish · CTC comparison</option>{% endif %}</select>
+        <div id="mode-field"{% if "flex" not in models %} hidden{% endif %}><label class="field-label" for="mode">Output script</label><select name="mode" id="mode"><option value="mixed">Mixed · Gujarati + Latin English</option><option value="native">Native · Gujarati script</option></select></div>
         <button class="primary" id="start-button" type="submit">Transcribe recording <span aria-hidden="true">↗</span></button>
-        <p class="privacy">Processed on this computer. Recordings and results stay in your project folders.</p>
+        {% if hosted %}<p class="privacy">Processed on this site’s server. Only you can see your recordings and results{% if retention_hours %}, and they are deleted after {{ retention_hours }} hours{% endif %}.</p>{% else %}<p class="privacy">Processed on this computer. Recordings and results stay in your project folders.</p>{% endif %}
       </form>
       <div class="history-section"><h3>Previous runs</h3><div id="history"><p class="muted">No saved transcripts yet.</p></div></div>
     </section>
@@ -58,7 +58,7 @@
       </div>
     </section>
   </div>
-  <footer><span>GUJARATI TRANSCRIBER</span><span>Local audio. Mixed language. Plain text.</span></footer>
+  <footer><span>GUJARATI TRANSCRIBER</span>{% if "flex" in models %}<span>Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat.</span>{% endif %}<span>{{ "Mixed language. Plain text." if hosted else "Local audio. Mixed language. Plain text." }}</span></footer>
 </main>
 </body>
 </html>
