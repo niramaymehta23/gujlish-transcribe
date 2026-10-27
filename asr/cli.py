@@ -89,17 +89,21 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
     detector = load_detector(args.detector) if args.chunking == "pause" else None
     metadata = _metadata(source, args, device, detector.name if detector else None)
     run_dir = getattr(args, "output_dir", None)
-    if run_dir is None and not args.reset:
+    if run_dir is None:
         candidates = sorted(
             (TRANSCRIPTS / source.stem / run_label(args.model, args.mode)).glob("*/.*.partial.json"), reverse=True
         )
         for candidate in candidates:
             try:
-                if json.loads(candidate.read_text(encoding="utf-8")).get("metadata") == metadata:
-                    run_dir = candidate.parent
-                    break
+                if json.loads(candidate.read_text(encoding="utf-8")).get("metadata") != metadata:
+                    continue
             except (OSError, ValueError):
                 continue
+            if args.reset:
+                candidate.unlink(missing_ok=True)  # otherwise a later run without --reset would resume it
+            else:
+                run_dir = candidate.parent
+                break
     run_dir = Path(run_dir).resolve() if run_dir else new_run(source, args.model, args.mode)
     run_dir.mkdir(parents=True, exist_ok=True)
     text_path, json_path, plot_path, checkpoint_path = run_paths(source, args.model, run_dir)

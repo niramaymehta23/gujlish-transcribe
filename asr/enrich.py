@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .llm import DEFAULT_LOCAL_URL, LLMError, claude_available, make_llm
+from .llm import DEFAULT_LOCAL_URL, LLMError, make_llm
 from .summarize import run_summary
 from .translate import STYLES, load_glossary, run_translation
 
@@ -32,7 +32,7 @@ def add_llm_arguments(parser: argparse.ArgumentParser, *, translation: bool = Tr
         group.add_argument(
             "--summary-llm",
             choices=["local", "claude", "gemini"],
-            help="Where the summary runs. Default: claude when ANTHROPIC_API_KEY is set, otherwise the --llm value",
+            help="Where the summary runs. Default: the --llm value, so text only leaves the computer if you choose that",
         )
         group.add_argument("--summary-model", help="Model id for the summary")
     if translation:
@@ -72,7 +72,7 @@ def resolve_transcript(path: Path) -> Path:
 
 
 def summary_llm_for(args):
-    provider = args.summary_llm or ("claude" if claude_available() else args.llm)
+    provider = args.summary_llm or args.llm
     model = args.summary_model or (args.llm_model if provider == args.llm else None)
     return make_llm(provider, model, args.llm_url)
 

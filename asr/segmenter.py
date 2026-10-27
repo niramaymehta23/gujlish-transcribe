@@ -181,11 +181,14 @@ class AudioChunk:
 
 def split_chunk(chunk: AudioChunk) -> list[AudioChunk] | None:
     """Split a chunk at its pause nearest the middle, for re-decoding a suspicious result. None if too short."""
-    frames = len(chunk.mask)
+    mask = chunk.mask
+    if not len(mask):  # fixed-mode chunks carry no speech mask: treat it all as speech and cut at the middle
+        mask = np.ones(len(chunk.samples) // FRAME, dtype=bool)
+    frames = len(mask)
     if chunk.duration < 4.0 or frames < 2:
         return None
     lo, hi = frames // 4, frames * 3 // 4
-    pauses = [(a, b) for a, b in runs(chunk.mask, False) if lo <= (a + b) // 2 <= hi]
+    pauses = [(a, b) for a, b in runs(mask, False) if lo <= (a + b) // 2 <= hi]
     if pauses:
         best = max(pauses, key=lambda p: (p[1] - p[0], -abs((p[0] + p[1]) // 2 - frames // 2)))
         cut_frame = (best[0] + best[1]) // 2
@@ -193,6 +196,6 @@ def split_chunk(chunk: AudioChunk) -> list[AudioChunk] | None:
         cut_frame = frames // 2
     cut_sample = min(len(chunk.samples), cut_frame * FRAME)
     cut_time = chunk.start + cut_sample / SAMPLE_RATE
-    left = AudioChunk(chunk.start, cut_time, chunk.samples[:cut_sample], True, chunk.overlap, chunk.mask[:cut_frame])
-    right = AudioChunk(cut_time, chunk.end, chunk.samples[cut_sample:], True, 0.0, chunk.mask[cut_frame:])
+    left = AudioChunk(chunk.start, cut_time, chunk.samples[:cut_sample], True, chunk.overlap, mask[:cut_frame])
+    right = AudioChunk(cut_time, chunk.end, chunk.samples[cut_sample:], True, 0.0, mask[cut_frame:])
     return [part for part in (left, right) if len(part.samples)]

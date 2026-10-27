@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
-from helpers import DeferredExecutor
 
 from evaluate import error_rate, normalize
+from tests.helpers import DeferredExecutor
 from web.server import create_app, markdown_docx
 
 

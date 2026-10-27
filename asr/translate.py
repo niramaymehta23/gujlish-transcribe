@@ -251,6 +251,7 @@ def run_translation(
             raise RuntimeError(
                 f"Translation settings or transcript changed since the interrupted run; use --reset: {partial}"
             )
+        good = 1
         for line in lines[1:]:
             try:
                 item = json.loads(line)
@@ -258,6 +259,10 @@ def run_translation(
                 flags[item["i"]] = item.get("flags", [])
             except (ValueError, KeyError, IndexError, TypeError):
                 break  # a half-written last line from an interrupted run
+            good += 1
+        if good < len(lines):
+            # Drop the broken tail so new lines are not glued onto it and lost on the next resume.
+            partial.write_text("".join(line + "\n" for line in lines[:good]), encoding="utf-8")
     else:
         partial.write_text(json.dumps({"meta": meta}, ensure_ascii=False) + "\n", encoding="utf-8")
 

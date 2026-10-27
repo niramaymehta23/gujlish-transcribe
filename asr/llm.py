@@ -12,8 +12,10 @@ Three providers share one `complete(system, user)` interface:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -44,30 +46,68 @@ class Completion:
     truncated: bool = False  # the model stopped because it hit max_tokens
 
 
+RATE_LIMIT_STATUS = {429, 529}  # "slow down": worth waiting longer for than an ordinary server error
+RATE_LIMIT_RETRIES = 6
+MAX_WAIT_SECONDS = 60.0
+
+
+def _wait_seconds(attempt: int, retry_after: str | None = None) -> float:
+    """Honor a server's Retry-After (in seconds) when given; otherwise back off exponentially with jitter."""
+    if retry_after:
+        try:
+            return min(MAX_WAIT_SECONDS, max(0.0, float(retry_after)))
+        except ValueError:
+            pass  # an HTTP date: fall back to backoff
+    return min(MAX_WAIT_SECONDS, 2.0**attempt) * random.uniform(0.75, 1.25)
+
+
 def _request(url: str, payload: dict | None, headers: dict, timeout: float, retries: int = 3) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     all_headers = {"Content-Type": "application/json", **headers}
-    for attempt in range(retries + 1):
+    attempt = timeouts = 0
+    while True:
         request = urllib.request.Request(url, data=data, headers=all_headers, method="GET" if data is None else "POST")
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                value = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")[:1000]
-            if error.code in RETRY_STATUS and attempt < retries:
-                time.sleep(min(30.0, 2.0**attempt))
+            limit = max(retries, RATE_LIMIT_RETRIES) if retries and error.code in RATE_LIMIT_STATUS else retries
+            if error.code in RETRY_STATUS and attempt < limit:
+                time.sleep(_wait_seconds(attempt, error.headers.get("Retry-After") if error.headers else None))
+                attempt += 1
                 continue
             raise LLMError(f"HTTP {error.code} from {url}: {body}", error.code, body) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as error:
             reason = getattr(error, "reason", error)
+            timed_out = isinstance(reason, TimeoutError)
+            timeouts += timed_out
             # A refused connection means nothing is listening (e.g. the local server is not started): fail at once.
-            if attempt < retries and not isinstance(reason, ConnectionRefusedError):
-                time.sleep(min(30.0, 2.0**attempt))
+            # A timeout is retried only once: each attempt already waited the full timeout, and a paid API may have
+            # processed (and billed) the request anyway.
+            if attempt < retries and not isinstance(reason, ConnectionRefusedError) and timeouts <= 1:
+                time.sleep(_wait_seconds(attempt))
+                attempt += 1
                 continue
-            raise LLMError(f"Could not reach {url}: {reason}") from None
+            raise LLMError(f"Could not reach {url}: {reason or type(error).__name__}") from None
         except ValueError as error:
             raise LLMError(f"Unreadable response from {url}: {error}") from None
-    raise LLMError(f"No response from {url}")  # pragma: no cover
+        if not isinstance(value, dict):
+            raise LLMError(f"Unexpected response from {url}: {str(value)[:300]}")
+        return value
+
+
+def _message_text(content: object) -> str:
+    """OpenAI-compatible content is usually a string, but some servers send a list of {type, text} parts."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+        )
+    raise TypeError(type(content).__name__)
 
 
 def strip_reasoning(text: str) -> str:
@@ -114,7 +154,12 @@ class LocalLLM:
             data = _request(f"{self.base_url}/models", None, self._headers(), timeout=3.0, retries=0)
         except LLMError:
             return None
-        return sorted(str(item.get("id")) for item in data.get("data", []) if item.get("id"))
+        items = data.get("data")
+        return (
+            sorted(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id"))
+            if isinstance(items, list)
+            else []
+        )
 
     def resolve_model(self) -> str:
         if self.model:
@@ -154,7 +199,7 @@ class LocalLLM:
         data = _request(f"{self.base_url}/chat/completions", payload, self._headers(), self.timeout)
         try:
             choice = data["choices"][0]
-            text = choice["message"]["content"] or ""
+            text = _message_text(choice["message"]["content"])
         except (KeyError, IndexError, TypeError):
             raise LLMError(f"Unexpected response from the local server: {str(data)[:300]}") from None
         return Completion(strip_reasoning(text), choice.get("finish_reason") == "length")

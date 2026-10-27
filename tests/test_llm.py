@@ -10,7 +10,10 @@ from asr.llm import ClaudeLLM, GeminiLLM, LLMError, LocalLLM, make_llm, parse_js
 
 
 class FakeServer:
-    """Serves scripted responses and records every request. handler(path, payload, headers) -> (status, body)."""
+    """Serves scripted responses and records every request.
+
+    handler(path, payload, headers) -> (status, body) or (status, body, response_headers).
+    """
 
     def __init__(self, handler):
         self.requests = []
@@ -19,9 +22,11 @@ class FakeServer:
         class Handler(BaseHTTPRequestHandler):
             def _serve(self, payload):
                 outer.requests.append((self.path, payload, dict(self.headers)))
-                status, body = handler(self.path, payload, dict(self.headers))
+                status, body, *extra = handler(self.path, payload, dict(self.headers))
                 data = json.dumps(body).encode()
                 self.send_response(status)
+                for name, value in (extra[0] if extra else {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -116,6 +121,48 @@ class TestLocal(unittest.TestCase):
         with patch("time.sleep"):
             self.assertEqual(LocalLLM("m", server.url).complete("s", "u").text, "ok")
         self.assertEqual(len(calls), 3)
+
+    def test_rate_limits_honor_retry_after_and_get_more_attempts(self):
+        calls = []
+
+        def handler(path, payload, headers):
+            calls.append(1)
+            if len(calls) <= 5:
+                return 429, {"error": "slow down"}, {"Retry-After": "7"}
+            return 200, {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        server = FakeServer(handler)
+        self.addCleanup(server.close)
+        with patch("time.sleep") as sleep:
+            self.assertEqual(LocalLLM("m", server.url).complete("s", "u").text, "ok")
+        self.assertEqual(len(calls), 6)  # more than the 3 retries ordinary errors get
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [7.0] * 5)
+
+    def test_timeouts_are_retried_only_once(self):
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as opened, patch("time.sleep"):
+            with self.assertRaisesRegex(LLMError, "Could not reach"):
+                LocalLLM("m", "http://127.0.0.1:9").complete("s", "u")
+        self.assertEqual(opened.call_count, 2)
+
+    def test_odd_response_shapes_become_clean_errors(self):
+        replies = iter(
+            [
+                {
+                    "choices": [
+                        {"message": {"content": [{"type": "text", "text": "Hel"}, {"type": "text", "text": "lo"}]}}
+                    ]
+                },
+                {"choices": [{"message": {"content": 42}}]},
+                [1, 2, 3],
+            ]
+        )
+        server = FakeServer(lambda path, payload, headers: (200, next(replies)))
+        self.addCleanup(server.close)
+        llm = LocalLLM("m", server.url)
+        self.assertEqual(llm.complete("s", "u").text, "Hello")  # content sent as a list of parts
+        for _ in range(2):
+            with self.assertRaises(LLMError):
+                llm.complete("s", "u")
 
 
 class TestClaude(unittest.TestCase):
