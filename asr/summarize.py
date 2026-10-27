@@ -143,6 +143,12 @@ def _norm(text: str) -> str:
     return re.sub(r"\W+", " ", text.casefold()).strip()
 
 
+def quote_found(quote: str, haystack: str) -> bool:
+    """True when the quote appears as whole words in the normalized translation. One-word "quotes" never count."""
+    needle = _norm(quote)
+    return len(needle.split()) >= 2 and f" {needle} " in f" {haystack} "
+
+
 def finalize(summary: dict, segments: list[dict]) -> dict:
     """Coerce the model's JSON into the expected shape and verify times and quotes against the translation."""
     starts = [segment["start"] for segment in segments]
@@ -193,7 +199,9 @@ def finalize(summary: dict, segments: list[dict]) -> dict:
     for quote in _list(summary.get("quotes")):
         if isinstance(quote, dict) and text(quote.get("quote")):
             words = text(quote["quote"]).strip('"“”')
-            result["quotes"].append({"quote": words, "t": snap(quote.get("t")), "verified": _norm(words) in haystack})
+            result["quotes"].append(
+                {"quote": words, "t": snap(quote.get("t")), "verified": quote_found(words, haystack)}
+            )
     for key, field in (("asks", "item"), ("unclear", "issue")):
         for item in _list(summary.get(key)):
             if isinstance(item, dict) and text(item.get(field)):

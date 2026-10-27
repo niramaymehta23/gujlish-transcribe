@@ -17,7 +17,12 @@ def _key(word: str) -> str:
     return unicodedata.normalize("NFC", word).casefold().strip(EDGE_PUNCTUATION)
 
 
-def remove_overlap(previous: str, current: str, limit: int = 12) -> tuple[str, int]:
+# Forced cuts share only 0.4 s of audio, so at most a word or two can be duplicated. A larger window would delete real
+# repetition (a refrain or chant continuing across the cut).
+OVERLAP_WORD_LIMIT = 3
+
+
+def remove_overlap(previous: str, current: str, limit: int = OVERLAP_WORD_LIMIT) -> tuple[str, int]:
     left, right = previous.split(), current.split()
     for size in range(min(limit, len(left), len(right)), 0, -1):
         if [_key(word) for word in left[-size:]] == [_key(word) for word in right[:size]]:

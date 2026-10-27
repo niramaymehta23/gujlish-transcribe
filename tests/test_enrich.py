@@ -1,12 +1,15 @@
 """Translation and summary stages, with a scripted stand-in for the language model."""
 
+import argparse
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from asr.enrich import summary_llm_for
 from asr.llm import Completion, LLMError
-from asr.summarize import build_sections, finalize, render_markdown, run_summary
+from asr.summarize import build_sections, finalize, quote_found, render_markdown, run_summary
 from asr.textutil import escape_tags, fmt_time, gujarati_ratio, parse_time
 from asr.translate import (
     assemble_text,
@@ -167,6 +170,22 @@ class TestRunTranslation(Base):
         self.assertEqual(len(resumed.calls), 1)
         self.assertIn("English line 1", resumed.calls[0]["user"])
 
+    def test_a_broken_line_is_dropped_so_later_progress_survives(self):
+        llm = FakeLLM()
+        llm.fail_at = 2
+        with self.assertRaises(RuntimeError):
+            run_translation(self.transcript, llm)
+        partial = next(self.run_dir.glob(".*.partial.jsonl"))
+        with partial.open("a") as handle:
+            handle.write('{"i": 1, "te')  # interrupted mid-write, before two segments are still to do
+        second = FakeLLM()
+        second.fail_at = 2  # translates segment 2, then stops again
+        with self.assertRaises(RuntimeError):
+            run_translation(self.transcript, second)
+        third = FakeLLM()
+        run_translation(self.transcript, third)
+        self.assertEqual(len(third.calls), 1)  # segment 2's saved line was not glued onto the broken one
+
     def test_changed_settings_refuse_to_resume_until_reset(self):
         llm = FakeLLM()
         llm.fail_at = 2
@@ -285,6 +304,18 @@ class TestSummary(Base):
         self.assertIn("ONLY one valid JSON", llm.calls[1]["user"])
         with self.assertRaisesRegex(RuntimeError, "Summary stopped"):
             run_summary(self.transcript, FakeLLM(lambda s, u, n: "never json"), reset=True)
+
+    def test_quotes_must_match_whole_words(self):
+        haystack = "there was a farmer who worked hard"
+        self.assertTrue(quote_found("A farmer who worked", haystack))
+        self.assertFalse(quote_found("the", haystack))  # one word, and only inside "there"
+        self.assertFalse(quote_found("ere was", haystack))
+        self.assertFalse(quote_found('""', haystack))
+
+    def test_summary_follows_the_translation_provider_even_with_a_claude_key(self):
+        args = argparse.Namespace(summary_llm=None, summary_model=None, llm="local", llm_model="m", llm_url=None)
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test"}):
+            self.assertEqual(summary_llm_for(args).provider, "local")
 
     def test_finalize_tolerates_malformed_model_output(self):
         segments = [{"start": 0.0, "end": 5.0, "text": "hello world"}, {"start": 60.0, "end": 65.0, "text": "bye"}]

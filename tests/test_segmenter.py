@@ -106,6 +106,13 @@ class TestSplitChunk(unittest.TestCase):
             left, right = split_chunk(self.chunk(parts))
             self.assertAlmostEqual(left.end - left.start, 5.0, delta=0.1)
 
+    def test_fixed_mode_chunk_without_a_mask_splits_in_the_middle(self):
+        samples = np.zeros(10 * RATE, dtype=np.float32)
+        left, right = split_chunk(AudioChunk(0.0, 10.0, samples, True, 0.4))
+        self.assertAlmostEqual(left.end, 5.0, delta=0.05)
+        self.assertEqual(len(left.samples) + len(right.samples), len(samples))
+        self.assertEqual((left.overlap, right.overlap), (0.4, 0.0))
+
     def test_too_short_to_split(self):
         self.assertIsNone(split_chunk(self.chunk([(3, True)])))
 
