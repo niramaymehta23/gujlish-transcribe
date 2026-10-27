@@ -24,9 +24,14 @@ def remove_overlap(previous: str, current: str, limit: int = 12) -> tuple[str, i
 
 
 def merge_segments(segments: list[dict]) -> str:
+    """Join chunk texts. Overlap repair runs only where the audio actually overlapped (forced cuts); a pause-aligned
+    boundary has no duplicated audio, so a repeated word there is real speech and must be kept."""
     merged = ""
     for segment in segments:
-        contribution, removed = remove_overlap(merged, segment.get("text", ""))
+        if segment.get("overlap", 1.0) > 0:  # segments saved before pause-aware chunking have no key: repair them
+            contribution, removed = remove_overlap(merged, segment.get("text", ""))
+        else:
+            contribution, removed = segment.get("text", "").strip(), 0
         segment["text"] = contribution
         if removed and segment.get("words"):
             segment["words"] = segment["words"][removed:]
