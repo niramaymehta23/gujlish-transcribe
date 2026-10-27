@@ -1,241 +1,214 @@
 # Gujarati Transcriber
 
-Local speech-to-text (automatic speech recognition, ASR) for **Gujarati and Gujarati–English recordings**, with a browser workspace and a CLI for repeatable experiments. After transcribing, it can **translate into natural spoken English that keeps the speaker's tone** and **summarize** the result into main points, key stories and quotes.
+Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary.
 
-Two speech models are available:
+- **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
+- **Runs locally.** Your recordings stay on your computer. Nothing is uploaded unless you choose a cloud model for translation.
+- **Browser app and command line.** Drop a file into the web page, or script it from the terminal.
+- **Handles long recordings.** Audio is cut at natural pauses, and an interrupted run picks up where it stopped.
+- **Exports.** Copy the text or download TXT and DOCX.
 
-- **Flex** ([Bodhan Indic-Transcribe Flex](https://huggingface.co/bodhan-ai/indic-transcribe-flex)) is the default. In its *mixed* mode, Gujarati words come out in Gujarati script and English words in Latin script; *native* mode writes everything in Gujarati script.
-- **Gujlish** ([WhissleAI Wav2Vec2](https://huggingface.co/WhissleAI/speech-tagger_gujlish_wav2vec2_meta)) is a smaller model of a different design, kept for comparison. It also reports word timings and how confident the model was in each word.
+## Contents
 
-## Features
+1. [What you need](#what-you-need)
+2. [Install](#install)
+3. [Set up Hugging Face (one time)](#set-up-hugging-face-one-time)
+4. [Run the app](#run-the-app)
+5. [Use the command line](#use-the-command-line)
+6. [Translate to English and summarize (optional)](#translate-to-english-and-summarize-optional)
+7. [Troubleshooting](#troubleshooting)
+8. [Project layout](#project-layout)
+9. [For developers](#for-developers)
+10. [License and credits](#license-and-credits)
 
-- Upload audio, see processing progress, and read the completed transcript.
-- Copy text or download TXT/DOCX; reopen previous completed runs.
-- Decode common audio/video containers through FFmpeg without extracting a full WAV.
-- Separate recordings, dated transcript runs, and optional CLI confidence plots.
-- Resume interrupted transcription from one hidden JSON checkpoint per run.
-- Select MPS automatically on compatible Apple hardware; CUDA and CPU are also supported.
-- Cut audio at the speaker's pauses (Silero VAD when installed, an energy detector otherwise), trim silence, skip stretches with no speech, and flag suspicious output (loops, implausible density) for a second decode.
-- **Translate to English** in a spoken, direct register using a local model (Ollama, LM Studio or `mlx_lm.server`) or, optionally, the Claude or Gemini API. Gujarati and English are kept side by side in a bilingual Markdown file.
-- **Summarize** the English into an overview, themes with timestamped points, key stories, quotes (checked against the text), asks and names.
-- Keep denoising, vocabulary correction, and plotting opt-in in the CLI.
+## What you need
 
-## Quick start
+- **A computer:** a Mac with Apple Silicon (M1 or later) works best and is what this is mainly built for. Linux and Intel Macs work too, more slowly without a GPU; an NVIDIA GPU on Linux is used automatically. Windows is untested.
+- **About 10 GB of free disk space** (the main model is about 4.6 GB, plus Python packages) and **16 GB of memory** recommended.
+- **Python 3.10 or newer** and **FFmpeg** (installation below).
+- **A free Hugging Face account** to download the speech model.
 
-Requirements: Python **3.10+**, FFmpeg/FFprobe, and sufficient memory/disk space for the selected model. Apple Silicon is the primary target. The Flex model card lists a checkpoint of approximately 4.6 GB; initial downloads can take time.
+## Install
 
-From the repository directory, on macOS:
+### 1. Install the tools
+
+**macOS** (with [Homebrew](https://brew.sh)):
 
 ```bash
-brew install ffmpeg
-python3 -m venv .venv
+brew install python@3.12 ffmpeg git
+```
+
+**Ubuntu / Debian:**
+
+```bash
+sudo apt update && sudo apt install python3 python3-venv ffmpeg git
+```
+
+### 2. Download this project
+
+```bash
+git clone https://github.com/niramaymehta23/gujlish-transcribe.git
+cd gujlish-transcribe
+```
+
+### 3. Create a Python environment and install the packages
+
+```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-On Ubuntu/Debian, install FFmpeg with `sudo apt install ffmpeg`, then use the same Python setup commands.
+On Linux, use `python3 -m venv .venv` if `python3.12` is not available. The install downloads PyTorch and can take several minutes.
 
-Flex is gated: accept its terms on the [model page](https://huggingface.co/bodhan-ai/indic-transcribe-flex) and authenticate once:
+You need to run `source .venv/bin/activate` again in every new terminal window before using the app. Your prompt shows `(.venv)` when it is active.
+
+## Set up Hugging Face (one time)
+
+The default speech model, **Indic-Transcribe Flex**, is free but *gated*: you must accept its terms on Hugging Face and sign in once from your computer before it can download.
+
+1. **Create an account** at [huggingface.co/join](https://huggingface.co/join) (free), and confirm your email address.
+2. **Accept the model's terms.** Open the [Indic-Transcribe Flex model page](https://huggingface.co/bodhan-ai/indic-transcribe-flex), read the license, and click the button to agree and get access. Access is usually granted straight away; the page shows when you have it.
+3. **Create an access token.** Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), click **Create new token**, choose the **Read** token type, give it a name (for example `gujarati-transcriber`), and click **Create**. Copy the token; it starts with `hf_`. Treat it like a password: don't share it or put it in any file in this project.
+4. **Sign in from your computer.** With the Python environment active, run:
+
+   ```bash
+   hf auth login
+   ```
+
+   Paste the token when asked (nothing shows as you paste; that is normal) and press Enter. When it asks about adding the token as a git credential, answer `n`.
+
+The model downloads automatically the first time you transcribe (about 4.6 GB), so the first run takes a while. After that it loads from your computer.
+
+The comparison model, **Gujlish**, is not gated and needs no extra steps.
+
+## Run the app
 
 ```bash
-hf auth login
-```
-
-Start the web app:
-
-```bash
+source .venv/bin/activate      # if not already active
 python app.py
 ```
 
-Open [http://localhost:8765](http://localhost:8765). Stop the server with `Ctrl+C`. For another port, use `python app.py --port 8766`.
+Open **[http://localhost:8765](http://localhost:8765)** in your browser. To stop the app, press `Ctrl+C` in the terminal. To use another port: `python app.py --port 8766`.
 
-`requirements.txt` includes `silero-vad` for the speech detector. Without it the app falls back to a simpler energy detector and says so.
+Then:
 
-Model files download on first use and remain in Hugging Face's shared cache. Once the required files are cached, `HF_HUB_OFFLINE=1 python app.py` runs without contacting the model hub.
+1. **Add a recording.** Drop it on the page or click to choose a file. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV).
+2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can be *Mixed* (Gujarati script plus English in English letters, the default) or *Native* (everything in Gujarati script). **Gujlish** is a smaller comparison model.
+3. **Click Transcribe recording.** The progress bar follows the audio processed so far. The first run also waits for the model to download and load.
+4. **Read, copy or download** the transcript as TXT or DOCX.
+5. **Optional:** open the **English** and **Summary** tabs to translate and summarize (see [below](#translate-to-english-and-summarize-optional)).
 
-## Browser workflow
+**Previous runs** on the left reopens earlier transcripts, even after restarting the app. If a run fails or you stop it, **Retry & resume** continues from the last finished chunk instead of starting over.
 
-1. Drop or choose a recording.
-2. Choose Flex or Gujlish. Flex offers mixed or native script output.
-3. Select **Transcribe recording** and follow upload, preparation, and audio-processing progress.
-4. Read the result, copy it, or download TXT/DOCX.
-5. Open the **English** tab, choose a local model, Claude or Gemini, and select **Translate to English**. Then open **Summary** and select **Summarize**. Each tab has its own copy and download (TXT/DOCX for English, MD/DOCX for the summary).
+Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`. Neither folder is ever uploaded to GitHub.
 
-Progress is based on completed audio chunks, not an estimated time to completion. Model preparation and inputs without known duration use an indeterminate indicator. One transcription runs at a time; other jobs wait to keep model memory bounded.
+**Fully offline:** once the model has downloaded, start the app with `HF_HUB_OFFLINE=1 python app.py` and it never contacts Hugging Face.
 
-The web app uses pause-aware chunking with the default detector, and no denoising, vocabulary correction, or plotting. TXT and JSON are saved automatically. DOCX is generated in memory when requested, preserving the transcript text in plain A4 paragraphs. Gujarati font rendering depends on the application opening the document.
+## Use the command line
 
-Failed jobs offer **Retry & resume**. Refreshing the browser reconnects to its active run; **Previous runs** reopens saved transcripts after a server restart. If the server is stopped mid-job, resume the checkpoint from the CLI with `--output-dir` pointing to that run directory.
-
-### Supported input formats
-
-Common formats include **M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, and WMA**, plus audio tracks in **MP4, MOV, MKV**, and other FFmpeg-compatible containers. The browser validates an actual audio stream using FFprobe rather than trusting the extension. The upload limit is **4 GB**.
-
-## CLI and repeatable experiments
-
-Place your input files in `recordings/`. Recordings and generated output are excluded from Git; private samples are not shipped with the repository.
+Useful for batches or for comparing settings. Put your files in `recordings/` (or anywhere) and run:
 
 ```bash
-python transcribe.py recordings/meeting.m4a flex
-python transcribe.py recordings/meeting.m4a flex --mode native
-python transcribe.py recordings/meeting.m4a gujlish
-python transcribe.py recordings/meeting.m4a gujlish --plot
+python transcribe.py recordings/talk.m4a flex                  # Gujarati + English (mixed script)
+python transcribe.py recordings/talk.m4a flex --mode native     # everything in Gujarati script
+python transcribe.py recordings/talk.m4a gujlish                # comparison model
+python transcribe.py recordings/talk.m4a gujlish --plot         # plus a confidence chart
 ```
 
-Optional controls:
+The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.txt`, with a matching `.json` that has timings. Running the same command again after an interruption resumes it; add `--reset` to start fresh.
 
-| Flag | Behavior |
+| Option | What it does |
 | --- | --- |
-| `--mode mixed\|native` | Flex output script; defaults to `mixed`. |
-| `--device auto\|mps\|cuda\|cpu` | Defaults to MPS when available, then CUDA, then CPU. Explicit unavailable devices fail. |
-| `--chunking pause\|fixed` | `pause` (default) cuts at pauses and skips silence; `fixed` is the original 27.5 s cuts with 0.4 s overlap, for comparison. |
-| `--detector auto\|silero\|energy` | Speech detector for pause chunking; `auto` uses Silero VAD if installed, else the energy gate. |
-| `--translate`, `--summarize` | After transcribing, run the English stages (see below). |
-| `--denoise` | Apply FFmpeg's `afftdn` filter to the decoded stream. |
-| `--vocab FILE` | Correct only explicit spelling variants supplied in a JSON vocabulary. |
-| `--plot` | Create one Gujlish confidence PNG after transcription; CLI only. |
-| `--reset` | Start fresh; earlier dated run folders remain available. |
-| `--output-dir PATH` | Select a transcript run folder explicitly, including for checkpoint resume. |
+| `--mode mixed` / `native` | Flex output script (default `mixed`). |
+| `--device auto` / `mps` / `cuda` / `cpu` | Where the model runs. `auto` picks the Apple GPU, then NVIDIA, then the CPU. |
+| `--chunking pause` / `fixed` | `pause` (default) cuts the audio at the speaker's pauses and skips silence; `fixed` cuts at fixed lengths. |
+| `--denoise` | Applies a light noise filter before transcribing. |
+| `--vocab FILE` | Fixes spellings you list, for example names. See `custom_words.example.json`. |
+| `--plot` | Saves a confidence chart (Gujlish only). |
+| `--translate`, `--summarize` | Also translate and summarize afterwards (next section). |
+| `--reset` | Ignore an unfinished earlier run and start again. |
+| `--output-dir PATH` | Save results in a folder you choose. |
 
-Use `custom_words.example.json` as a vocabulary template:
+`python transcribe.py --help` lists every option.
+
+## Translate to English and summarize (optional)
+
+After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. You choose where this runs:
+
+| Option | Privacy | Cost | What you need |
+| --- | --- | --- | --- |
+| **A local model** | Nothing leaves your computer | Free | [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai) and a downloaded model |
+| **Gemini** | Transcript text (never audio) goes to Google | Pay per use, usually well under $1 per long recording | A Gemini API key |
+| **Claude** | Transcript text (never audio) goes to Anthropic | Pay per use | An Anthropic API key |
+
+### Using a local model (Ollama)
+
+1. Install Ollama from [ollama.com](https://ollama.com) and open it.
+2. Download a model: `ollama pull <model-name>`. No benchmark covers spoken Gujarati-to-English yet, so try a few on your own audio. Good candidates on a 16–18 GB Mac are TranslateGemma (4B or 12B), Sarvam-Translate (4B) and general 12–14B instruction models.
+3. Start the transcriber as usual. In the **English** tab, choose **Local model**, pick the model from the list, and click **Translate to English**. Then open **Summary** and click **Summarize**.
+
+### Using Gemini or Claude
+
+API keys are read only from your terminal's environment, never typed into the web page. Set the key in the terminal, then start the app from that same terminal:
 
 ```bash
-python transcribe.py recordings/meeting.m4a flex --vocab custom_words.example.json
+export GEMINI_API_KEY="your-key"         # from aistudio.google.com/apikey
+# or
+export ANTHROPIC_API_KEY="your-key"      # from console.anthropic.com
+python app.py
 ```
 
-### Folder layout and automatic naming
+Gemini or Claude then becomes selectable in the **English** tab. Check your provider's data-use terms before sending private recordings.
+
+### From the command line
+
+```bash
+python transcribe.py recordings/talk.m4a flex --translate --summarize --llm-model <model-name>
+python translate.py transcripts/talk/flex-mixed/<date-time>/ --llm gemini     # translate an existing run
+python summarize.py transcripts/talk/flex-mixed/<date-time>/ --llm gemini     # then summarize it
+```
+
+Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.flex.bilingual.md` (Gujarati and English side by side) and `talk.flex.summary.md`.
+
+Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--limit 15 --label test` to try a model on the first 15 segments without touching the full output. The summary uses the same provider as the translation unless you pass `--summary-llm`.
+
+## Troubleshooting
+
+| Problem | Fix |
+| --- | --- |
+| `401` / `403` / "gated repo" error when the model downloads | Accept the terms on the [Flex model page](https://huggingface.co/bodhan-ai/indic-transcribe-flex) with the same account, then run `hf auth login` again with a **Read** token. |
+| `hf: command not found` | Activate the environment first (`source .venv/bin/activate`); the `hf` command is installed with the packages. |
+| `ffmpeg` or `ffprobe` not found | Install FFmpeg (`brew install ffmpeg` or `sudo apt install ffmpeg`), then open a new terminal. |
+| `ModuleNotFoundError` | The environment isn't active: run `source .venv/bin/activate`, then `python -m pip install -r requirements.txt`. |
+| The page doesn't open | Check that `python app.py` is still running in a terminal, and use `http://localhost:8765`. |
+| "Address already in use" | Another copy is running. Stop it, or use `python app.py --port 8766`. |
+| Very slow | The first run downloads and loads the model. Without an Apple or NVIDIA GPU, transcription runs on the CPU and takes much longer. |
+| A quiet recording comes out empty | Try `--chunking fixed` on the command line, which doesn't rely on detecting speech. |
+| "No local model server found" in the English tab | Start Ollama or LM Studio and download a model, or use Gemini or Claude. |
+
+## Project layout
 
 ```text
-gujarati-transcriber/
-├── app.py                         # local web entry point
-├── transcribe.py                  # CLI entry point
-├── evaluate.py                    # WER / CER evaluation
-├── translate.py                   # translate a transcript to spoken English
-├── summarize.py                   # summarize the English translation
-├── asr/                           # backends, chunking, merge, storage, LLM stages
-├── web/                           # Flask server, HTML, CSS, JavaScript
-├── tests/                         # synthetic regression tests
-├── recordings/                    # local inputs; ignored by Git
-├── transcripts/                   # dated runs; ignored by Git
-├── plots/                         # optional CLI plots; ignored by Git
-├── docs/process-report.md         # development history and validation limits
-├── docs/design-notes.md           # why chunking, translation and summaries work the way they do
-├── docs/deploy-cloud-run.md       # putting the app online with Google Cloud Run
-├── deploy/                        # Dockerfile helpers, Cloud Build config, setup and deploy scripts
-├── custom_words.example.json      # template for --vocab spelling corrections
-├── glossary.example.json          # template for --glossary names and terms in translation
-├── requirements.txt               # application dependencies
-└── requirements-test.txt          # lightweight CI / regression dependencies
+gujlish-transcribe/
+├── app.py                      # start the web app
+├── transcribe.py               # command-line transcription
+├── translate.py                # translate a transcript to English
+├── summarize.py                # summarize the English
+├── evaluate.py                 # measure accuracy against a reference transcript
+├── asr/                        # speech models, audio chunking, translation and summary code
+├── web/                        # the browser app (Flask server, page, styles, script)
+├── tests/                      # automated tests (no model download needed)
+├── docs/                       # design notes and development history
+├── custom_words.example.json   # template for --vocab
+├── glossary.example.json       # template for --glossary
+├── recordings/                 # your recordings (kept out of Git)
+└── transcripts/                # your results (kept out of Git)
 ```
 
-For `meeting.m4a`, paths are derived automatically from the basename, backend/mode, and run timestamp:
+## For developers
 
-```text
-transcripts/meeting/flex-mixed/20261014-173000-123456/meeting.flex.txt
-transcripts/meeting/flex-mixed/20261014-173000-123456/meeting.flex.json
-transcripts/meeting/gujlish/20261014-174000-654321/meeting.gujlish.txt
-plots/meeting/gujlish/20261014-174000-654321/meeting.gujlish.confidence.png
-```
-
-Successful reruns create independent dated folders. Interrupted CLI runs resume the latest checkpoint matching the input and inference settings. Uploading an existing filename adds a numbered suffix instead of overwriting it. Use distinct recording basenames when you want separate groups; CLI inputs sharing a basename share a group, but retain independent dated runs. A non-default `--output-dir` places transcripts/checkpoints there; optional plots remain under `plots/`.
-
-## English translation and summary
-
-```bash
-# Local model (Ollama shown; LM Studio and mlx_lm.server also work)
-ollama pull <model>                      # choose one; see "Choosing a local model" below
-python transcribe.py recordings/talk.m4a flex --translate --summarize --llm-model <model>
-
-# Or run the stages on an existing run folder
-python translate.py transcripts/talk/flex-mixed/RUN/ --llm local --llm-model <model>
-export ANTHROPIC_API_KEY=...             # only if you use Claude
-python summarize.py transcripts/talk/flex-mixed/RUN/ --summary-llm claude
-```
-
-Outputs sit next to the transcript: `talk.flex.en.txt` (English, paragraphs follow pauses), `talk.flex.en.json` (per-segment Gujarati/English pairs and flags), `talk.flex.bilingual.md` (read the English against the Gujarati), `talk.flex.summary.md` and `.json`.
-
-**How the tone is kept.** Dedicated translation models take one instruction and offer no tone control, so tone comes from an instruction-following LLM. Each segment is translated with a brief describing the spoken register, the previous three segments with the English already produced (consistent names and phrasing), a short preview of the next segment, and your glossary. The model is told to translate meaning rather than words, carry over emotion and emphasis, use `[unclear]` instead of guessing, and treat transcript text as content, never instructions. `--tone faithful` gives a closer, plainer rendering; `--style-note "a village elder addressing a gathering"` adds context; `--glossary glossary.example.json` fixes names and terms.
-
-**Summary.** The English is summarized in sections and merged, so long talks work with small local context windows. Times are snapped to real segment starts, and every quote is checked against the translation: a quote the text does not contain is shown as a paraphrase. The summary uses the same provider and model as the translation unless you choose another (`--summary-llm`, `--summary-model`).
-
-**Privacy.** With `--llm local` nothing leaves the computer. With Claude (`ANTHROPIC_API_KEY`) or Gemini (`GEMINI_API_KEY`, or `GOOGLE_API_KEY`), only transcript *text* (never audio) is sent to Anthropic or Google. Keys are read from environment variables only; the web app never accepts or stores a key. Check the data-use terms for your Gemini key's tier before sending private recordings.
-
-**Using Gemini.** `export GEMINI_API_KEY=...`, then add `--llm gemini` (and/or `--summary-llm gemini`), or pick Gemini in the web app after starting it from a shell where the variable is set. The default model is `gemini-3.8-flash` (the stable model code on Google's model page). Translation is a language task, not a reasoning task, so requests ask for the lowest thinking level the model allows (`low`) and send no `temperature`, which Google's 3.8 notes say to drop. Choose another model with `--llm-model` or `GUJLISH_GEMINI_MODEL`; a Flash-Lite tier is cheaper but its Gujarati quality is untested here, so compare it with `--limit` first. At Google's published prices ($0.75 per million input and $3.75 per million output tokens until 31 December 2026, double after that), a long recording should cost well under a dollar. That figure is an estimate, not a measurement. Gemini is reached through Google's OpenAI-compatible endpoint, which has not been tested against the live service here.
-
-### Choosing a local model
-
-No benchmark covers spoken Gujarati to English in a particular tone, so the right local model has to be chosen on your own audio. Candidates worth trying on an 18 GB Apple Silicon machine (about 4–14B parameters at 4-bit): Sarvam-Translate (a 4B Gemma 3 fine-tune for 22 Indian languages; its tone claim comes from its authors), TranslateGemma 12B or 4B, and a general instruction model of 12–14B. Their Gujarati→English quality for spoken text is **not verified here**. Compare them like this:
-
-```bash
-python translate.py RUN/ --llm-model modelA --limit 15      # writes talk.flex.en-sample.txt
-python translate.py RUN/ --llm-model modelB --limit 15 --label modelB
-```
-
-`--limit N` translates the first N segments into a labeled sample so full outputs are untouched. Read the bilingual files side by side; if no local model reads as natural speech, use `--llm claude` for translation.
-
-## Challenges, decisions, and trade-offs
-
-The project began as a single-file CLI. Stabilizing it required checking real upstream APIs and balancing recognition quality against runtime cost, generated-text risk, and operational simplicity.
-
-| Challenge | Decision and outcome | Remaining trade-off |
-| --- | --- | --- |
-| Gujarati–English code-switching | Keep Flex as the primary backend and pass `lang="gu", mode="mixed"` explicitly. Drop Whisper, which my own informal comparisons ranked below Flex. | Quality preference reflects practical observations, not a published benchmark from this project. |
-| Unsupported generated text | Add Gujlish CTC for comparison; keep transcripts free of generative grammar rewriting. | Neither architecture guarantees an error-free or hallucination-free transcript. |
-| Long recordings and memory | Stream FFmpeg PCM into bounded windows (27.5 s for Flex, 15.5 s for Gujlish) and cut each at the latest clean pause (at least 0.25 s). A forced cut with 0.4 s overlap is only the last resort. | Speech detectors are imperfect and a continuous speaker still forces cuts; full hour-long model inference remains unverified. |
-| Duplicate boundary text | Pause cuts need no de-duplication. Only forced cuts (which overlap) remove exact word suffix/prefix matches, ignoring edge punctuation and case. | This is a simple heuristic; it may miss partial-word duplicates or remove real repetition. |
-| Recognizer loops and silence | Flag repeated phrases and implausibly dense text, then re-decode that chunk in two halves; skip chunks with no speech. Text is never edited by the guards. | Thresholds are unmeasured heuristics; sparse output is flagged but not retried. |
-| Broken Gujlish loading example | Small-file checks showed missing processor configuration. Follow the author's raw-waveform and `vocab.json` inference path instead of `AutoProcessor`. | Upstream packaging changes can require loader updates. |
-| Meaningful confidence | Extract CTC softmax probabilities and greedy frame spans; expose Flex confidence as unavailable. | Model probability is not accuracy; timestamps are approximate, without forced alignment. |
-| Apple acceleration | Preserve the PyTorch backend and choose MPS when available. | CoreML/MLX conversion and a controlled M3 Pro throughput benchmark remain open work. |
-| Optional preprocessing | Default to plain decode → ASR; apply filters/corrections only on request. | Denoising can lose speech cues. CTC vocabulary correction requires low confidence; Flex supports exact supplied variants without a confidence gate. |
-| Progress after interruption | Atomically update one partial JSON and resume completed chunks. | Resume re-decodes earlier audio, and rewriting checkpoint JSON grows with the transcript. |
-| File clutter and comparisons | Replace per-chunk work folders with dated transcript runs and matching plot folders. | Run folders intentionally accumulate; you decide when to delete old ones. |
-| Unicode uploads and exports | Preserve Gujarati combining marks in filenames, number duplicates, and retain Unicode text in TXT/DOCX. | Display fonts vary across systems. |
-| Plotting in restricted environments | Use a headless Matplotlib backend and temporary writable cache. | Plotting is optional and deliberately excluded from the web UI. |
-
-Implementation testing also caught and corrected a NumPy view retaining a resizable audio buffer. The decoder now releases that view before removing consumed samples. These details, development stages, and verification evidence are recorded in the [process report](docs/process-report.md).
-
-## Validation and limitations
-
-Completed development checks include real Flex inference in mixed/native modes, a short Flex CLI run, a 50-second Gujlish CLI run, a browser upload-to-transcript run, and one confidence PNG. Synthetic regression tests cover resume, overlapping text, file collisions, invalid audio, Unicode exports, run separation, history reconstruction, and WER/CER calculations.
-
-For the pause-aware chunking, boundaries were measured against a whole-file Silero VAD on real English speech: cuts landing inside speech fell from 8 of 8 (fixed) to 1 of 8, with no speech frames lost. That measures boundary quality, **not word error rate**: the Flex model could not be run in that test environment, so WER with and without pause chunking, the guard thresholds and the translation models on Gujarati are untested. The translation and summary stages were verified end to end with scripted stand-in servers, not with real Gujarati audio.
-
-These checks establish basic functionality. They do **not** establish dataset-level accuracy, hallucination rates, hour-long reliability, or fastest Apple GPU execution. No labeled corpus benchmark or controlled CoreML/MLX/MPS comparison has been completed. Locally, the web tool is intended for a single user; hosted mode adds the controls described under [Hosted website](#hosted-website).
-
-## Roadmap
-
-The current release runs locally: follow the Python/FFmpeg installation steps above, download the required model, and launch the browser interface on your own computer. The capabilities below are planned extensions, not features available in this release. The aim is to make Gujarati recordings useful to more readers while keeping the original transcript available as the source of truth.
-
-### Done: English translation and summaries
-
-English translation (local model, Claude or Gemini) and structured summaries are implemented; see [English translation and summary](#english-translation-and-summary). Remaining work is evaluation: a labeled set of Gujarati speech with reference English to compare local models, and a measured WER comparison of pause-aware and fixed chunking.
-
-### Near term: transliteration
-
-Gujarati → Latin transliteration for readers who understand Gujarati but prefer English letters: a script conversion that preserves the spoken language, not a translation. It would be a separately labeled output that leaves the source transcript intact. No provider or model has been selected.
-
-### Provider access
-
-Claude and Gemini are supported through the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` environment variables. A key-entry flow in the browser is deliberately not provided: any future one must keep keys out of logs and browser storage, say which provider receives what, and treat transcript content as untrusted input to the model. A key does not make this a secure multi-user service.
-
-### Hosted website
-
-The app can run as a website on Google Cloud Run with a GPU that scales to zero when idle: see [docs/deploy-cloud-run.md](docs/deploy-cloud-run.md). Hosted mode (`GUJLISH_HOSTED=1`) adds an optional site password, per-visitor privacy, upload/length limits, automatic deletion after 24 hours, and chunked uploads, and turns translation off unless you allow it. Flex's license requires Bodhan AI's approval before hosting it for other people, so the deployment offers Gujlish only by default.
-
-Still open: running transcription as a background job service so a job survives the visitor closing the tab, and more than one job at a time.
-
-## Evaluation and development
-
-Evaluate a prediction against a UTF-8 reference:
-
-```bash
-python evaluate.py reference.txt transcripts/meeting/flex-mixed/RUN/meeting.flex.txt
-```
-
-Add `--normalize` to ignore case, punctuation (including the danda) and Unicode composition, and use the same setting for every system you compare. Without it, WER uses whitespace-separated words. CER uses Unicode code points, including internal whitespace; otherwise neither metric normalizes text. Results are rates (`0.1250` means 12.5%). Empty reference and prediction yield zero; an empty reference with non-empty prediction yields one by convention. Evaluation downloads no datasets.
-
-Run checks without downloading model weights:
+Run the checks (no model download or GPU needed):
 
 ```bash
 python -m pip install -r requirements-test.txt
@@ -244,12 +217,16 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-GitHub Actions runs the regression, lint, formatting, and JavaScript syntax checks on Python 3.10/3.12. GPU/model inference remains a separate manual check. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance and [SECURITY.md](SECURITY.md) for local-use privacy and security boundaries.
+To measure accuracy against a reference transcript, run `python evaluate.py reference.txt transcripts/.../talk.flex.txt --normalize`, which reports word and character error rates.
 
-## Licensing and acknowledgements
+Design decisions, what has and hasn't been verified, and open questions are in [docs/design-notes.md](docs/design-notes.md) and [docs/process-report.md](docs/process-report.md). See also [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-Application code and documentation are licensed under [MIT](LICENSE). Model weights and downloaded upstream inference code retain their own licenses; this repository does not redistribute them.
+## License and credits
 
-- [Bodhan Indic-Transcribe Flex](https://huggingface.co/bodhan-ai/indic-transcribe-flex): gated model; review and accept its upstream terms.
-- [WhissleAI Gujlish Wav2Vec2](https://huggingface.co/WhissleAI/speech-tagger_gujlish_wav2vec2_meta): the model card identifies Apache 2.0 licensing.
-- FFmpeg, PyTorch, Transformers, Flask, python-docx, and Matplotlib provide the decoding, inference, UI, export, and optional plotting components.
+The code in this repository is [MIT licensed](LICENSE). The speech models are not part of this repository; each is downloaded from Hugging Face under its own license.
+
+- [**Indic-Transcribe Flex**](https://huggingface.co/bodhan-ai/indic-transcribe-flex) by Bodhan AI, under the Bodhan AI Open Model License. Running it on your own computer is permitted; hosting it as a service for other people requires Bodhan AI's approval, so read its license before doing that.
+- [**Gujlish Wav2Vec2**](https://huggingface.co/WhissleAI/speech-tagger_gujlish_wav2vec2_meta) by WhissleAI, under Apache 2.0.
+- Built on FFmpeg, PyTorch, Hugging Face Transformers, Silero VAD, Flask and python-docx.
+
+Transcripts, translations and summaries are machine-generated. Check names, numbers and quotes before sharing them.
