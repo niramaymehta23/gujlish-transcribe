@@ -1,5 +1,6 @@
 numpy>=1.26
 torch>=2.2,<3
+torchaudio>=2.2,<3  # needed by the Flex model's own inference code
 transformers>=4.45,<6
 huggingface-hub>=0.24
 sentencepiece>=0.2

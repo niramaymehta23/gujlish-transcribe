@@ -1,6 +1,8 @@
 # Security and privacy
 
-This is a single-user local tool. `app.py` binds to `127.0.0.1` with debug mode disabled. It has no account system, authenticated multi-user API, or public hosting configuration. Keep it on the loopback interface.
+By default this is a single-user local tool. `app.py` binds to `127.0.0.1` with debug mode disabled; keep it on the loopback interface.
+
+Hosted mode (`GUJLISH_HOSTED=1`, see [docs/deploy-cloud-run.md](docs/deploy-cloud-run.md)) is for a small shared site: one optional shared password (no individual accounts), visitors separated by a signed cookie, upload and length limits, automatic deletion after a retention period, and cloud language models off unless the owner allows them. The password and session key come from Secret Manager, never from the repository. It is not designed for large or adversarial audiences.
 
 Recordings and transcripts are saved unencrypted in the project directories. DOCX downloads are generated in memory. The initial model download and authentication contact Hugging Face; inference uses local model weights. Flex loads Python inference code supplied by the upstream model repository. Review and trust that upstream source before running it.
 

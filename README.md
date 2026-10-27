@@ -120,6 +120,8 @@ gujarati-transcriber/
 ├── plots/                         # optional CLI plots; ignored by Git
 ├── docs/process-report.md         # development history and validation limits
 ├── docs/design-notes.md           # why chunking, translation and summaries work the way they do
+├── docs/deploy-cloud-run.md       # putting the app online with Google Cloud Run
+├── deploy/                        # Dockerfile helpers, Cloud Build config, setup and deploy scripts
 ├── custom_words.example.json      # template for --vocab spelling corrections
 ├── glossary.example.json          # template for --glossary names and terms in translation
 ├── requirements.txt               # application dependencies
@@ -199,7 +201,7 @@ Completed development checks include real Flex inference in mixed/native modes, 
 
 For the pause-aware chunking, boundaries were measured against a whole-file Silero VAD on real English speech: cuts landing inside speech fell from 8 of 8 (fixed) to 1 of 8, with no speech frames lost. That measures boundary quality, **not word error rate**: the Flex model could not be run in that test environment, so WER with and without pause chunking, the guard thresholds and the translation models on Gujarati are untested. The translation and summary stages were verified end to end with scripted stand-in servers, not with real Gujarati audio.
 
-These checks establish basic functionality. They do **not** establish dataset-level accuracy, hallucination rates, hour-long reliability, or fastest Apple GPU execution. No labeled corpus benchmark or controlled CoreML/MLX/MPS comparison has been completed. The web tool is intended for a single local user, not public multi-user deployment.
+These checks establish basic functionality. They do **not** establish dataset-level accuracy, hallucination rates, hour-long reliability, or fastest Apple GPU execution. No labeled corpus benchmark or controlled CoreML/MLX/MPS comparison has been completed. Locally, the web tool is intended for a single user; hosted mode adds the controls described under [Hosted website](#hosted-website).
 
 ## Roadmap
 
@@ -217,13 +219,11 @@ Gujarati → Latin transliteration for readers who understand Gujarati but prefe
 
 Claude and Gemini are supported through the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` environment variables. A key-entry flow in the browser is deliberately not provided: any future one must keep keys out of logs and browser storage, say which provider receives what, and treat transcript content as untrusted input to the model. A key does not make this a secure multi-user service.
 
-### Longer term: a hosted website
+### Hosted website
 
-Make the workflow accessible through a public website so users can transcribe without installing Python, FFmpeg, or model weights. This requires a model-serving environment with suitable compute, managed job execution, concurrency limits, and an operating-cost model. Containerization, potentially with Docker, can help package dependencies, but a deployment approach has not been chosen.
+The app can run as a website on Google Cloud Run with a GPU that scales to zero when idle: see [docs/deploy-cloud-run.md](docs/deploy-cloud-run.md). Hosted mode (`GUJLISH_HOSTED=1`) adds an optional site password, per-visitor privacy, upload/length limits, automatic deletion after 24 hours, and chunked uploads, and turns translation off unless you allow it. Flex's license requires Bodhan AI's approval before hosting it for other people, so the deployment offers Gujlish only by default.
 
-Public hosting also requires authentication or appropriate access controls, isolation between users, upload validation, rate and resource limits, protected credentials, and explicit data-retention/deletion policies. Model-hosting and redistribution permissions must be reviewed against upstream terms before launch. The existing loopback Flask app is a local interface, not the proposed public service.
-
-There are no release dates attached to these items. Public hosting requires further security and operational design.
+Still open: running transcription as a background job service so a job survives the visitor closing the tab, and more than one job at a time.
 
 ## Evaluation and development
 

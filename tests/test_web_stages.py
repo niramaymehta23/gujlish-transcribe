@@ -37,7 +37,7 @@ class TestStages(unittest.TestCase):
             encoding="utf-8",
         )
         self.executor = DeferredExecutor()
-        patcher = patch("web.server.TRANSCRIPTS", self.root / "transcripts")
+        patcher = patch("asr.storage.TRANSCRIPTS", self.root / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
         # Snapshot os.environ so any API keys a test sets are rolled back afterwards.
