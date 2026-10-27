@@ -1,4 +1,4 @@
-"""Regression tests for output organisation, resume and web exports."""
+"""Regression tests for output organization, resume and web exports."""
 
 import io
 import json
@@ -8,18 +8,41 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from asr.cli import build_parser, run
+import numpy as np
+
+from asr.cli import _decode_chunk, build_parser, run
+from asr.postprocess import merge_segments
+from asr.segmenter import AudioChunk
 from asr.storage import new_run, run_paths
 from evaluate import error_rate
+from tests.helpers import DeferredExecutor
 from web.server import create_app, transcript_docx
 
 
-class DeferredExecutor:
-    def __init__(self):
-        self.tasks = []
+class TestMergeAndRedecode(unittest.TestCase):
+    def test_forced_cut_removes_only_a_short_duplicate(self):
+        refrain = "જય શ્રી કૃષ્ણ જય શ્રી કૃષ્ણ"
+        segments = [{"text": refrain, "overlap": 0.0}, {"text": refrain + " આગળ", "overlap": 0.4}]
+        # The six repeated words are real chanting; at most a few words of a 0.4 s overlap may be dropped.
+        self.assertEqual(merge_segments(segments), f"{refrain} જય શ્રી કૃષ્ણ આગળ")
+        segments = [{"text": "આજે machine learning", "overlap": 0.0}, {"text": "learning વિશે", "overlap": 0.4}]
+        self.assertEqual(merge_segments(segments), "આજે machine learning વિશે")
 
-    def submit(self, function, *args):
-        self.tasks.append((function, args))
+    def test_fixed_mode_loops_are_redecoded_in_halves(self):
+        class Backend:
+            def __init__(self):
+                self.calls = []
+
+            def transcribe(self, samples, start, end, mode):
+                self.calls.append((start, end))
+                text = "એક બે " * 40 if len(self.calls) == 1 else " ".join(f"word{i}" for i in range(30))
+                return {"start": start, "end": end, "text": text}
+
+        backend = Backend()
+        chunk = AudioChunk(0.0, 27.5, np.zeros(int(27.5 * 16_000), dtype=np.float32), True, 0.0)
+        segment = _decode_chunk(backend, chunk, "mixed")
+        self.assertEqual(len(backend.calls), 3)
+        self.assertEqual(segment["flags"], ["redecoded_in_halves"])
 
 
 class TestWorkflow(unittest.TestCase):
@@ -48,7 +71,11 @@ class TestWorkflow(unittest.TestCase):
 
     def test_resume_outputs_and_overlap(self):
         output = self.root / "transcripts" / "run"
-        args = build_parser().parse_args([str(self.source), "flex", "--device", "cpu", "--output-dir", str(output)])
+        # Silero (if installed) treats a sine tone as non-speech and would skip every chunk; fixed chunking keeps the
+        # two chunks this test relies on regardless of which detector is installed.
+        args = build_parser().parse_args(
+            [str(self.source), "flex", "--device", "cpu", "--chunking", "fixed", "--output-dir", str(output)]
+        )
 
         class Backend:
             def __init__(self):
@@ -80,10 +107,42 @@ class TestWorkflow(unittest.TestCase):
         self.assertIsNone(plot)
         self.assertEqual(events[-1]["stage"], "complete")
 
+    def test_reset_discards_the_old_matching_checkpoint(self):
+        transcripts = self.root / "transcripts"
+        argv = [str(self.source), "flex", "--device", "cpu", "--chunking", "fixed"]
+
+        class Failing:  # finishes one chunk, so a checkpoint is saved, then stops
+            calls = 0
+
+            def transcribe(self, samples, start, end, mode):
+                Failing.calls += 1
+                if Failing.calls == 2:
+                    raise RuntimeError("Simulated interruption")
+                return {"start": start, "end": end, "text": "જૂનું"}
+
+        class Working:
+            def transcribe(self, samples, start, end, mode):
+                return {"start": start, "end": end, "text": "નવું"}
+
+        with patch("asr.cli.TRANSCRIPTS", transcripts), patch("asr.storage.TRANSCRIPTS", transcripts):
+            with (
+                patch("asr.cli.choose_device", return_value="cpu"),
+                patch("asr.cli.load_backend", return_value=Failing()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "interruption"):
+                    run(build_parser().parse_args(argv))
+            self.assertEqual(len(list(transcripts.glob("*/*/*/.*.partial.json"))), 1)
+            with (
+                patch("asr.cli.choose_device", return_value="cpu"),
+                patch("asr.cli.load_backend", return_value=Working()),
+            ):
+                run(build_parser().parse_args(argv + ["--reset"]))
+            self.assertEqual(list(transcripts.glob("*/*/*/.*.partial.json")), [])
+
     def test_upload_collision_validation_and_downloads(self):
         executor = DeferredExecutor()
         with (
-            patch("web.server.RECORDINGS", self.root / "recordings"),
+            patch("asr.storage.RECORDINGS", self.root / "recordings"),
             patch("asr.storage.TRANSCRIPTS", self.root / "transcripts"),
         ):
             app = create_app(executor=executor)
@@ -153,7 +212,7 @@ class TestWorkflow(unittest.TestCase):
                 json.dumps({"source": f"{name}.wav", "model": "flex", "mode": "mixed", "duration": 3.0}),
                 encoding="utf-8",
             )
-        with patch("web.server.TRANSCRIPTS", root):
+        with patch("asr.storage.TRANSCRIPTS", root):
             client = create_app(executor=DeferredExecutor()).test_client()
             history = client.get("/api/history").json
             self.assertEqual([entry["name"] for entry in history], ["a_new.wav", "z_old.wav"])

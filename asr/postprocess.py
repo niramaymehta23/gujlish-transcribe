@@ -8,6 +8,8 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
+# Vocabulary corrections apply only to Gujlish words below this CTC probability; the plot marks the same line.
+CORRECTION_CONFIDENCE = 0.75
 EDGE_PUNCTUATION = ".,!?;:\"'()[]{}…।॥"
 
 
@@ -15,7 +17,12 @@ def _key(word: str) -> str:
     return unicodedata.normalize("NFC", word).casefold().strip(EDGE_PUNCTUATION)
 
 
-def remove_overlap(previous: str, current: str, limit: int = 12) -> tuple[str, int]:
+# Forced cuts share only 0.4 s of audio, so at most a word or two can be duplicated. A larger window would delete real
+# repetition (a refrain or chant continuing across the cut).
+OVERLAP_WORD_LIMIT = 3
+
+
+def remove_overlap(previous: str, current: str, limit: int = OVERLAP_WORD_LIMIT) -> tuple[str, int]:
     left, right = previous.split(), current.split()
     for size in range(min(limit, len(left), len(right)), 0, -1):
         if [_key(word) for word in left[-size:]] == [_key(word) for word in right[:size]]:
@@ -24,9 +31,14 @@ def remove_overlap(previous: str, current: str, limit: int = 12) -> tuple[str, i
 
 
 def merge_segments(segments: list[dict]) -> str:
+    """Join chunk texts. Overlap repair runs only where the audio actually overlapped (forced cuts); a pause-aligned
+    boundary has no duplicated audio, so a repeated word there is real speech and must be kept."""
     merged = ""
     for segment in segments:
-        contribution, removed = remove_overlap(merged, segment.get("text", ""))
+        if segment.get("overlap", 1.0) > 0:  # segments saved before pause-aware chunking have no key: repair them
+            contribution, removed = remove_overlap(merged, segment.get("text", ""))
+        else:
+            contribution, removed = segment.get("text", "").strip(), 0
         segment["text"] = contribution
         if removed and segment.get("words"):
             segment["words"] = segment["words"][removed:]
@@ -50,7 +62,7 @@ def load_vocabulary(path: Path) -> dict[str, str]:
     return variants
 
 
-def correct_segments(segments: list[dict], variants: dict[str, str], threshold: float = 0.75) -> None:
+def correct_segments(segments: list[dict], variants: dict[str, str], threshold: float = CORRECTION_CONFIDENCE) -> None:
     for segment in segments:
         words = segment.get("words")
         if words is not None:
@@ -82,7 +94,7 @@ def confidence_plot(segments: list[dict], output: Path) -> None:
         fig, axis = plt.subplots(figsize=(12, 4))
         axis.plot(x, y, linewidth=0.8, color="#2864dc")
         axis.scatter(x, y, s=7, color="#2864dc")
-        axis.axhline(0.75, color="#c43c35", linestyle="--", linewidth=0.8)
+        axis.axhline(CORRECTION_CONFIDENCE, color="#c43c35", linestyle="--", linewidth=0.8)
         axis.set(xlabel="Recording time (seconds)", ylabel="CTC probability", ylim=(0, 1.02))
         axis.grid(alpha=0.2)
         fig.tight_layout()

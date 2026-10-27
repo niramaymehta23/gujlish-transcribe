@@ -1,21 +1,42 @@
 """Automatic, recording-based run paths shared by the CLI and web app."""
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RECORDINGS = ROOT / "recordings"
-TRANSCRIPTS = ROOT / "transcripts"
-PLOTS = ROOT / "plots"
+# Recordings and outputs live under the project by default; a hosted deployment points this at mounted storage.
+DATA = Path(os.environ.get("GUJLISH_DATA_DIR") or ROOT)
+RECORDINGS = DATA / "recordings"
+TRANSCRIPTS = DATA / "transcripts"
+PLOTS = DATA / "plots"
+
+
+def run_label(model: str, mode: str) -> str:
+    """Folder name for a backend: flex-mixed / flex-native (Flex has two script modes), or gujlish."""
+    return model + (f"-{mode}" if model == "flex" else "")
 
 
 def new_run(source: Path, model: str, mode: str) -> Path:
-    label = model + (f"-{mode}" if model == "flex" else "")
-    folder = TRANSCRIPTS / source.stem / label
+    folder = TRANSCRIPTS / source.stem / run_label(model, mode)
     folder.mkdir(parents=True, exist_ok=True)
     run = folder / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run.mkdir()
     return run
+
+
+def stage_paths(transcript_json: Path, label: str | None = None) -> dict[str, Path]:
+    """Output paths for the translation and summary stages, next to a run's `<name>.<model>.json` transcript."""
+    stem, folder = transcript_json.stem, transcript_json.parent
+    tag = f"-{label}" if label else ""
+    return {
+        "translation_txt": folder / f"{stem}.en{tag}.txt",
+        "translation_json": folder / f"{stem}.en{tag}.json",
+        "bilingual": folder / f"{stem}.bilingual{tag}.md",
+        "translation_partial": folder / f".{stem}.en{tag}.partial.jsonl",
+        "summary_md": folder / f"{stem}.summary{tag}.md",
+        "summary_json": folder / f"{stem}.summary{tag}.json",
+    }
 
 
 def run_paths(source: Path, model: str, run_dir: Path):
