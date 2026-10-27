@@ -84,7 +84,7 @@ class TestPassword(HostedBase):
         client = self.app(password="open sesame").test_client()
         self.assertEqual(client.get("/").status_code, 302)
         self.assertEqual(client.get("/api/history").status_code, 401)
-        self.assertEqual(client.get("/healthz").status_code, 200)
+        self.assertEqual(client.get("/health").status_code, 200)
         with patch("web.server.time.sleep") as slowed:
             self.assertEqual(client.post("/login", data={"password": "wrong"}).status_code, 401)
         slowed.assert_called_once()

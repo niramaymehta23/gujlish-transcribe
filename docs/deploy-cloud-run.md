@@ -35,7 +35,7 @@ Visitors are told apart by a signed cookie. Someone who clears their cookies or 
    gcloud auth login
    ```
 4. **Hugging Face token.** At [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with **read** access. The build uses it to download the models.
-5. **GPU quota.** Cloud Run GPUs may need a quota increase in a new project. If the first deploy reports a quota error, request "Total Nvidia L4 GPU allocation without zonal redundancy, per project per region" for your region under IAM & Admin → Quotas, then deploy again.
+5. **GPU quota.** A project gets a quota of 3 L4 GPUs (without zonal redundancy) automatically on its first GPU deployment in a region, which is more than this setup uses. Only request more under IAM & Admin → Quotas if a deploy reports a quota error.
 6. **Edit `deploy/config.sh`.** Set `PROJECT_ID`, and choose a `REGION` that offers Cloud Run L4 GPUs (see Google's [Cloud Run GPU docs](https://cloud.google.com/run/docs/configuring/services/gpu) for the current list; pick the one nearest your users).
 7. **Run the setup script** from the repository folder. It turns on the needed Google services, creates the image repository, storage bucket and secrets, and grants permissions. It asks for your Hugging Face token and a site password without displaying them.
    ```bash

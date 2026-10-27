@@ -316,7 +316,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return jsonify(error="Sign in again: your session has ended."), 401
             return redirect(url_for("login"))
 
-    @app.get("/healthz")
+    @app.get("/health")  # Cloud Run reserves /healthz
     def health():
         return "ok"
 
