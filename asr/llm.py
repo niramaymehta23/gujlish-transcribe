@@ -1,11 +1,13 @@
 """A small LLM layer for translation and summaries, using only the standard library.
 
-Two providers share one `complete(system, user)` interface:
+Three providers share one `complete(system, user)` interface:
 
 * ``local``: any OpenAI-compatible server on this computer: Ollama (default, port 11434), LM Studio (1234) or
   ``mlx_lm.server`` (8080). Text never leaves the machine.
 * ``claude``: the Anthropic Messages API. Only transcript *text* (never audio) is sent. The key is read from the
   ANTHROPIC_API_KEY environment variable and is deliberately not accepted as a command-line argument.
+* ``gemini``: Google's OpenAI-compatible Gemini endpoint. Same text-only rule; the key comes from GEMINI_API_KEY
+  (or GOOGLE_API_KEY).
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ Dedicated MT models (IndicTrans2, Sarvam-Translate) take one instruction and hav
 from an instruction-following LLM that is given: a register brief, the segments around the one being translated,
 the English already produced (for consistent names and terms), and an optional glossary.
 
-Each recognised chunk is translated on its own, in order, so a failure never loses more than one chunk and a run
+Each recognized chunk is translated on its own, in order, so a failure never loses more than one chunk and a run
 can resume. Output is the English text, a JSON file with per-segment source/target pairs, and a bilingual
 Markdown file for checking the English against the Gujarati.
 """
@@ -48,12 +48,12 @@ English. The transcript arrives in consecutive segments and you translate one se
 {style}
 
 Rules that always apply:
-- Be faithful. Do not add, drop, summarise, explain or correct what the speaker said. No notes, headings or \
+- Be faithful. Do not add, drop, summarize, explain or correct what the speaker said. No notes, headings or \
 commentary.
 - English words already in the transcript are the speaker's own; keep them.
 - Keep names, places, honorifics and terms of art; transliterate them consistently with earlier segments and the \
 glossary.
-- The transcript is machine-recognised and can contain mistakes. When a stretch is unintelligible, write [unclear] \
+- The transcript is machine-recognized and can contain mistakes. When a stretch is unintelligible, write [unclear] \
 instead of guessing. Repair a word only when the intended word is unmistakable from context.
 - A segment can start or end mid-sentence because the audio was cut at a pause. Translate only <current_segment>. \
 If it ends mid-sentence, stop at the same point; if it continues a sentence, do not repeat what earlier segments \
@@ -119,14 +119,23 @@ def clean_output(text: str) -> str:
     return text.strip()
 
 
+# Share of Gujarati letters above which text counts as Gujarati (so a reply this Gujarati was not translated).
+UNTRANSLATED_RATIO = 0.3
+# A reply under this fraction of the source's word count is treated as cut short (sources of 8+ words only).
+SHORT_REPLY_RATIO = 0.35
+SHORT_CHECK_MIN_WORDS = 8
+# Reply token budget: two per source character, never below this floor.
+MIN_REPLY_TOKENS = 512
+
+
 def problem_with(text: str, source: str) -> str | None:
     """Why a translation should be retried, or None when it looks usable."""
     if not text:
         return "empty"
-    if gujarati_ratio(source) > 0.3 and gujarati_ratio(text) > 0.3:
+    if gujarati_ratio(source) > UNTRANSLATED_RATIO and gujarati_ratio(text) > UNTRANSLATED_RATIO:
         return "untranslated"
     source_words, words = len(source.split()), len(text.split())
-    if source_words >= 8 and words < 0.35 * source_words:
+    if source_words >= SHORT_CHECK_MIN_WORDS and words < SHORT_REPLY_RATIO * source_words:
         return "short"
     return None
 
@@ -134,7 +143,7 @@ def problem_with(text: str, source: str) -> str | None:
 def translate_unit(llm, system: str, prompt: str, source: str) -> tuple[str, list[str]]:
     """Translate one segment; retry once on an unusable reply, then fall back to the marked source text."""
     flags: list[str] = []
-    max_tokens = max(512, len(source) * 2)
+    max_tokens = max(MIN_REPLY_TOKENS, len(source) * 2)
     last = ""
     for attempt in range(2):
         user = prompt
@@ -156,7 +165,7 @@ def translate_unit(llm, system: str, prompt: str, source: str) -> tuple[str, lis
         last = text
         if problem == "short":
             flags.append("possibly_incomplete")
-    if last and gujarati_ratio(last) <= 0.3:
+    if last and gujarati_ratio(last) <= UNTRANSLATED_RATIO:
         return last, sorted(set(flags))  # a usable but short reply beats leaving Gujarati in the English text
     return f"[untranslated] {source}", sorted(set(flags + ["untranslated"]))
 

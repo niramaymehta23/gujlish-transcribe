@@ -1,6 +1,6 @@
 """Pause-aware chunking: cut long audio where the speaker pauses, not mid-word.
 
-The ASR models accept about 30 s of audio. Cutting at fixed offsets splits words and forces text-level overlap
+Each model has a maximum chunk length (about 30 s for Flex, 16 s for Gujlish). Cutting at fixed offsets splits words and forces text-level overlap
 repair. Instead, the streaming decoder asks a speech detector for per-frame speech probabilities, cuts at the
 latest usable pause before the maximum chunk length, trims leading/trailing silence, and skips chunks without
 speech (a common trigger for generated text). A forced fixed cut with a small overlap is only the fallback when
@@ -24,7 +24,7 @@ FRAME_SECONDS = FRAME / SAMPLE_RATE
 SPEECH_THRESHOLD = 0.5
 GOOD_PAUSE_SECONDS = 0.25  # a pause this long is a clean place to cut
 SHORT_PAUSE_SECONDS = 0.10  # last-resort pause
-MIN_CUT_SECONDS = 10.0  # prefer chunks at least this long (more context helps the recogniser)
+MIN_CUT_SECONDS = 10.0  # prefer chunks at least this long (more context helps the recognizer)
 MIN_FALLBACK_CUT_SECONDS = 6.0
 EDGE_PAD_SECONDS = 0.40  # silence kept around speech when trimming; short word onsets sit just outside the VAD
 MIN_SPEECH_SECONDS = 0.30  # less than this in a chunk counts as "no speech"

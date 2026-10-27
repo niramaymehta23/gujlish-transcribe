@@ -95,9 +95,9 @@ function updateStageBox() {
   const noServer = local && !models.length;
   $('stage-explain').textContent = key === 'translation'
     ? 'Translate the transcript into natural spoken English that keeps the speaker’s tone, not a word-for-word version.'
-    : (translated ? 'Summarise the English into an overview, main points by theme, key stories and quotes, each with a time.' : 'Translate the transcript first. The summary is written from the English.');
+    : (translated ? 'Summarize the English into an overview, main points by theme, key stories and quotes, each with a time.' : 'Translate the transcript first. The summary is written from the English.');
   const button = $('stage-button');
-  button.textContent = state.status === 'complete' ? 'Run again' : (key === 'translation' ? 'Translate to English' : 'Summarise');
+  button.textContent = state.status === 'complete' ? 'Run again' : (key === 'translation' ? 'Translate to English' : 'Summarize');
   button.disabled = busy || noServer || (key === 'summary' && !translated);
   $('stage-track').hidden = !busy;
   $('stage-fill').classList.toggle('indeterminate', busy && state.progress == null);
@@ -215,6 +215,7 @@ async function loadHistory() {
     for (const run of runs) {
       const button = document.createElement('button'); button.type='button'; button.className='history-item';
       const name = document.createElement('span'); name.textContent=run.name;
+      // run folders are named YYYYMMDD-HHMMSS-ffffff (asr/storage.new_run)
       const detail = document.createElement('small'); detail.textContent=`${run.model}${run.mode ? ' · '+run.mode : ''} · ${run.run.slice(0,8)} ${run.run.slice(9,15)}`;
       button.append(name,detail); button.onclick=()=>{ if ($('start-button').disabled) return; jobId=run.id; sessionStorage.setItem('asr-job',jobId); pollFailures=0; poll(); }; $('history').append(button);
     }

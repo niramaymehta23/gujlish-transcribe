@@ -1,4 +1,4 @@
-"""Web endpoints for the translation and summary stages, and the evaluation normaliser."""
+"""Web endpoints for the translation and summary stages, and the evaluation normalizer."""
 
 import io
 import json
@@ -8,17 +8,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
+from helpers import DeferredExecutor
 
 from evaluate import error_rate, normalize
 from web.server import create_app, markdown_docx
-
-
-class DeferredExecutor:
-    def __init__(self):
-        self.tasks = []
-
-    def submit(self, function, *args):
-        self.tasks.append((function, args))
 
 
 class TestStages(unittest.TestCase):
@@ -47,6 +40,7 @@ class TestStages(unittest.TestCase):
         patcher = patch("web.server.TRANSCRIPTS", self.root / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Snapshot os.environ so any API keys a test sets are rolled back afterwards.
         env = patch.dict("os.environ", {}, clear=False)
         env.start()
         self.addCleanup(env.stop)
@@ -148,7 +142,7 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(normalize("ક્ષ"), normalize("ક્ષ"))
         self.assertEqual(normalize("é"), normalize("é"))  # composed and decomposed forms are equal
 
-    def test_normalisation_changes_the_score_only_for_punctuation_and_case(self):
+    def test_normalization_changes_the_score_only_for_punctuation_and_case(self):
         reference, prediction = "આજે, Machine learning.", "આજે machine learning"
         raw = error_rate(reference.split(), prediction.split())
         clean = error_rate(normalize(reference).split(), normalize(prediction).split())

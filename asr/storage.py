@@ -9,9 +9,13 @@ TRANSCRIPTS = ROOT / "transcripts"
 PLOTS = ROOT / "plots"
 
 
+def run_label(model: str, mode: str) -> str:
+    """Folder name for a backend: flex-mixed / flex-native (Flex has two script modes), or gujlish."""
+    return model + (f"-{mode}" if model == "flex" else "")
+
+
 def new_run(source: Path, model: str, mode: str) -> Path:
-    label = model + (f"-{mode}" if model == "flex" else "")
-    folder = TRANSCRIPTS / source.stem / label
+    folder = TRANSCRIPTS / source.stem / run_label(model, mode)
     folder.mkdir(parents=True, exist_ok=True)
     run = folder / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     run.mkdir()

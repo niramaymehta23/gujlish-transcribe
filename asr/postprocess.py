@@ -8,6 +8,8 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
+# Vocabulary corrections apply only to Gujlish words below this CTC probability; the plot marks the same line.
+CORRECTION_CONFIDENCE = 0.75
 EDGE_PUNCTUATION = ".,!?;:\"'()[]{}…।॥"
 
 
@@ -55,7 +57,7 @@ def load_vocabulary(path: Path) -> dict[str, str]:
     return variants
 
 
-def correct_segments(segments: list[dict], variants: dict[str, str], threshold: float = 0.75) -> None:
+def correct_segments(segments: list[dict], variants: dict[str, str], threshold: float = CORRECTION_CONFIDENCE) -> None:
     for segment in segments:
         words = segment.get("words")
         if words is not None:
@@ -87,7 +89,7 @@ def confidence_plot(segments: list[dict], output: Path) -> None:
         fig, axis = plt.subplots(figsize=(12, 4))
         axis.plot(x, y, linewidth=0.8, color="#2864dc")
         axis.scatter(x, y, s=7, color="#2864dc")
-        axis.axhline(0.75, color="#c43c35", linestyle="--", linewidth=0.8)
+        axis.axhline(CORRECTION_CONFIDENCE, color="#c43c35", linestyle="--", linewidth=0.8)
         axis.set(xlabel="Recording time (seconds)", ylabel="CTC probability", ylim=(0, 1.02))
         axis.grid(alpha=0.2)
         fig.tight_layout()
