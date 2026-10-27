@@ -22,11 +22,11 @@ from uuid import uuid4
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import asr.storage as storage
-from asr.llm import LocalLLM, claude_available, gemini_available
+from asr.llm import gemini_available
 from asr.storage import ROOT, new_run, stage_paths
+from asr.subtitles import to_srt
 from web.settings import Settings
 
-MODEL_ID = re.compile(r"[\w.:/@+-]{1,200}")
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
 UPLOAD_CHUNK_BYTES = 8 * 1024**2  # Cloud Run caps a request body at 32 MiB, so large files arrive in pieces
 UPLOAD_ID = re.compile(r"[0-9a-f]{32}")
@@ -302,7 +302,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             paths = stage_paths(Path(job["json"]))
             produced = paths["translation_txt"] if key == "translation" else paths["summary_md"]
             if produced.exists():
-                return {"status": "complete", "progress": 100, "message": "Ready", "llm": state.get("llm")}
+                return {"status": "complete", "progress": 100, "message": "Ready"}
         return state or {"status": "idle"}
 
     @app.before_request
@@ -472,42 +472,22 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                     result["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
         return jsonify(result)
 
+    def gemini_ready() -> bool:
+        # Hosted sites use Gemini only when the owner allows it, because it runs on the owner's key.
+        return gemini_available() and (not settings.hosted or settings.allow_gemini)
+
     @app.get("/api/capabilities")
     def capabilities():
-        # What the translation/summary stages can use right now. API keys are read from the environment only.
-        if settings.hosted:  # visitors have no local model server; cloud APIs run on the owner's key
-            allowed = settings.allow_cloud_llm
-            return jsonify(
-                hosted=True,
-                local=False,
-                claude=allowed and claude_available(),
-                gemini=allowed and gemini_available(),
-                local_url=None,
-                local_models=[],
-            )
-        local = LocalLLM()
-        return jsonify(
-            hosted=False,
-            local=True,
-            claude=claude_available(),
-            gemini=gemini_available(),
-            local_url=local.base_url,
-            local_models=local.models(),
-        )
+        # Whether translation/summaries can run. The key itself stays in the server's environment.
+        return jsonify(hosted=settings.hosted, gemini=gemini_ready())
 
     def start_stage(job_id, key):
-        body = request.get_json(silent=True) or {}
-        provider, model = body.get("llm", "local"), body.get("model") or None
-        if provider not in {"local", "claude", "gemini"}:
-            return jsonify(error="Choose local, claude or gemini."), 400
-        if settings.hosted and (provider == "local" or not settings.allow_cloud_llm):
-            return jsonify(error="Translation and summaries are not enabled on this site."), 400
-        if model is not None and not (isinstance(model, str) and MODEL_ID.fullmatch(model)):
-            return jsonify(error="That model name is not valid."), 400
-        if provider == "claude" and not claude_available():
-            return jsonify(error="The Claude API needs ANTHROPIC_API_KEY set where the server was started."), 400
-        if provider == "gemini" and not gemini_available():
-            return jsonify(error="The Gemini API needs GEMINI_API_KEY set where the server was started."), 400
+        with lock:
+            find_job(job_id)
+        if not gemini_ready():
+            if settings.hosted:
+                return jsonify(error="Translation and summaries are not enabled on this site."), 400
+            return jsonify(error="Set GEMINI_API_KEY in the terminal before starting the app (see the README)."), 400
         with lock:
             job = find_job(job_id)
             if job.get("status") != "complete" or not job.get("json"):
@@ -516,22 +496,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return jsonify(error="Translate the transcript before summarizing it."), 409
             if (job.get(key) or {}).get("status") in {"queued", "running"}:
                 return jsonify(error="This step is already running."), 409
-            job[key] = {
-                "status": "queued",
-                "progress": None,
-                "message": "Waiting for the current run…",
-                "llm": provider,
-            }
+            job[key] = {"status": "queued", "progress": None, "message": "Waiting for the current run…"}
             transcript_json = job["json"]
-        script, provider_flag, model_flag = (
-            ("translate.py", "--llm", "--llm-model")
-            if key == "translation"
-            else ("summarize.py", "--summary-llm", "--summary-model")
-        )
-        command = [sys.executable, str(ROOT / script), transcript_json, provider_flag, provider]
-        if model:
-            command.append(f"{model_flag}={model}")  # one argument, so a value can never be read as a flag
-        command.append("--progress-json")
+        script = "translate.py" if key == "translation" else "summarize.py"
+        command = [sys.executable, str(ROOT / script), transcript_json, "--progress-json"]
         pool.submit(run_stage, job_id, key, command)
         return jsonify(id=job_id), 202
 
@@ -570,6 +538,19 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 as_attachment=True,
                 download_name=txt.with_suffix(".docx").name,
                 mimetype=docx_type,
+            )
+        if kind in {"srt", "en-srt"} and job.get("json"):
+            # Built from the timed segments, so runs saved before SRT files existed can still be exported.
+            source = Path(job["json"]) if kind == "srt" else stage_paths(Path(job["json"]))["translation_json"]
+            if not source.exists():
+                abort(404)
+            segments = json.loads(source.read_text(encoding="utf-8")).get("segments", [])
+            name = source.with_suffix(".srt").name
+            return send_file(
+                BytesIO(to_srt(segments).encode("utf-8")),
+                as_attachment=True,
+                download_name=name,
+                mimetype="application/x-subrip; charset=utf-8",
             )
         # English translation and summary files sit next to the transcript.
         paths = stage_paths(Path(job["json"])) if job.get("json") else {}

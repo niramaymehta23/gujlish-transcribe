@@ -73,15 +73,6 @@ async function loadCaps() {
   updateStageBox();
 }
 function stageKey() { return tab === 'translation' || tab === 'summary' ? tab : null; }
-function fillModels() {
-  const select = $('llm-model'), models = (caps && caps.local_models) || [], signature = models.join('|');
-  if (select.dataset.sig === signature) return;
-  const previous = select.value;
-  select.replaceChildren();
-  for (const name of models) { const option = document.createElement('option'); option.value = name; option.textContent = name; select.append(option); }
-  if (models.includes(previous)) select.value = previous;
-  select.dataset.sig = signature;
-}
 function updateStageBox() {
   const key = stageKey(), box = $('stage-box');
   box.hidden = !current || !key;
@@ -89,52 +80,36 @@ function updateStageBox() {
   const state = current[key] || { status: 'idle' };
   const busy = state.status === 'queued' || state.status === 'running';
   const translated = (current.translation || {}).status === 'complete';
-  const localOption = $('llm').querySelector('option[value=local]');
-  localOption.hidden = localOption.disabled = Boolean(caps && caps.local === false);
-  for (const [value, name, variable, company] of [['claude', 'Claude', 'ANTHROPIC_API_KEY', 'Anthropic'], ['gemini', 'Gemini', 'GEMINI_API_KEY', 'Google']]) {
-    const option = $('llm').querySelector(`option[value=${value}]`);
-    option.disabled = !(caps && caps[value]);
-    option.hidden = HOSTED && option.disabled;
-    option.textContent = option.disabled ? `${name} API · set ${variable} to enable` : `${name} API · sends text (not audio) to ${company}`;
-  }
-  if ($('llm').selectedOptions[0]?.disabled) {
-    const usable = [...$('llm').options].find(option => !option.disabled);
-    if (usable) $('llm').value = usable.value;
-  }
-  const offline = HOSTED && caps && !caps.claude && !caps.gemini;
-  const local = $('llm').value === 'local', models = (caps && caps.local_models) || [];
-  fillModels();
-  $('llm-model').hidden = !local || !models.length;
-  $('llm').disabled = busy; $('llm-model').disabled = busy;
-  const noServer = !offline && local && !models.length;
+  const unavailable = Boolean(caps && !caps.gemini);
+  $('llm-note').hidden = unavailable;
   $('stage-explain').textContent = key === 'translation'
     ? 'Translate the transcript into natural spoken English that keeps the speaker’s tone, not a word-for-word version.'
     : (translated ? 'Summarize the English into an overview, main points by theme, key stories and quotes, each with a time.' : 'Translate the transcript first. The summary is written from the English.');
   const button = $('stage-button');
   button.textContent = state.status === 'complete' ? 'Run again' : (key === 'translation' ? 'Translate to English' : 'Summarize');
-  button.disabled = busy || noServer || offline || (key === 'summary' && !translated);
-  box.querySelector('.stage-controls').hidden = Boolean(offline);
+  button.disabled = busy || unavailable || (key === 'summary' && !translated);
+  button.hidden = unavailable;
   $('stage-track').hidden = !busy;
   $('stage-fill').classList.toggle('indeterminate', busy && state.progress == null);
   $('stage-fill').style.width = busy && state.progress != null ? `${state.progress}%` : '';
   let status = '';
   if (stageNotice) status = stageNotice;
   else if (busy || state.status === 'error') status = state.message || '';
-  else if (offline) status = 'Translation and summaries are not enabled on this site.';
-  else if (noServer) status = `No local model server found at ${caps ? caps.local_url : 'the default address'}. Start Ollama or LM Studio and load a model, or choose Claude or Gemini.`;
+  else if (unavailable) status = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate and summarize, set GEMINI_API_KEY in the terminal and restart the app (see the README).';
   $('stage-status').textContent = status;
 }
 function updateExports() {
   if (!current) return;
   const views = {
-    transcript: { text: current.text, links: ['txt', 'docx'], names: ['TXT', 'DOCX'] },
-    translation: { text: current.translation_text, links: ['en-txt', 'en-docx'], names: ['TXT', 'DOCX'] },
+    transcript: { text: current.text, links: ['txt', 'docx', 'srt'], names: ['TXT', 'DOCX', 'SRT'] },
+    translation: { text: current.translation_text, links: ['en-txt', 'en-docx', 'en-srt'], names: ['TXT', 'DOCX', 'SRT'] },
     summary: { text: current.summary_markdown, links: ['summary-md', 'summary-docx'], names: ['MD', 'DOCX'] },
   };
   const view = views[tab], has = Boolean(view.text);
   $('copy-button').hidden = !has;
-  for (const [id, index] of [['txt-download', 0], ['docx-download', 1]]) {
-    $(id).hidden = !has;
+  for (const [id, index] of [['txt-download', 0], ['docx-download', 1], ['srt-download', 2]]) {
+    $(id).hidden = !has || !view.links[index];
+    if ($(id).hidden) continue;
     $(id).href = `/api/jobs/${jobId}/download/${view.links[index]}`;
     $(id).textContent = `↓ ${view.names[index]}`;
   }
@@ -238,18 +213,15 @@ $('retry-button').addEventListener('click', async () => {
 });
 $('stage-button').addEventListener('click', async () => {
   const key = stageKey(); if (!key || !current) return;
-  const body = { llm: $('llm').value };
-  if (body.llm === 'local' && $('llm-model').value) body.model = $('llm-model').value;
   stageNotice = ''; $('stage-button').disabled = true;
   try {
-    const response = await fetch(`/api/jobs/${jobId}/${key === 'translation' ? 'translate' : 'summarize'}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await fetch(`/api/jobs/${jobId}/${key === 'translation' ? 'translate' : 'summarize'}`, { method: 'POST' });
     if (signedOut(response)) return;
     const data = await response.json().catch(() => ({}));
     if (!response.ok) { stageNotice = data.error || 'Could not start this step.'; updateStageBox(); return; }
     pollFailures = 0; poll();
   } catch { stageNotice = `Could not reach ${SERVER}.`; updateStageBox(); }
 });
-$('llm').addEventListener('change', () => { stageNotice = ''; updateStageBox(); });
 $('copy-button').addEventListener('click', async () => {
   const text = { transcript: current && current.text, translation: current && current.translation_text, summary: current && current.summary_markdown }[tab] || '';
   try { await navigator.clipboard.writeText(text); $('copy-button').textContent = 'Copied ✓'; setTimeout(() => $('copy-button').textContent='Copy text', 2000); }

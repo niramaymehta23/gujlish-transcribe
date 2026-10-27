@@ -44,7 +44,7 @@ class HostedBase(unittest.TestCase):
 
     def app(self, **overrides):
         options = dict(
-            hosted=True, secret_key=SECRET, max_upload_mb=5, max_minutes=90, retention_hours=24, allow_cloud_llm=False
+            hosted=True, secret_key=SECRET, max_upload_mb=5, max_minutes=90, retention_hours=24, allow_gemini=False
         )
         options.update(overrides)
         self.executor = DeferredExecutor()
@@ -69,7 +69,7 @@ class TestSettings(unittest.TestCase):
         with patch.dict("os.environ", {"GUJLISH_HOSTED": "1", "GUJLISH_SECRET_KEY": SECRET}, clear=True):
             settings = Settings.from_env()
         self.assertEqual((settings.max_upload_mb, settings.max_minutes, settings.retention_hours), (300, 90, 24))
-        self.assertFalse(settings.allow_cloud_llm)
+        self.assertFalse(settings.allow_gemini)
         with patch.dict("os.environ", {"GUJLISH_HOSTED": "1"}, clear=True), self.assertRaises(ValueError):
             Settings.from_env()  # no secret key
         env = {"GUJLISH_MODELS": "gujlish,whisper"}
@@ -156,16 +156,19 @@ class TestUploadsAndPrivacy(HostedBase):
 
 
 class TestHostedLLM(HostedBase):
-    def test_local_models_are_hidden_and_cloud_needs_permission(self):
+    def test_gemini_needs_permission_on_a_hosted_site(self):
         client = self.app().test_client()
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test"}):
-            caps = client.get("/api/capabilities").json
-            self.assertEqual((caps["local"], caps["claude"], caps["gemini"]), (False, False, False))
-            caps = self.app(allow_cloud_llm=True).test_client().get("/api/capabilities").json
-            self.assertTrue(caps["claude"])
         job_id = self.start_job(client).json["id"]
-        response = client.post(f"/api/jobs/{job_id}/translate", json={"llm": "local"})
-        self.assertEqual(response.status_code, 400)
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "g-secret"}):
+            self.assertEqual(client.get("/api/capabilities").json, {"hosted": True, "gemini": False})
+            response = client.post(f"/api/jobs/{job_id}/translate")
+            self.assertEqual(
+                (response.status_code, response.json["error"]),
+                (400, "Translation and summaries are not enabled on this site."),
+            )
+            allowed = self.app(allow_gemini=True).test_client()
+            self.assertTrue(allowed.get("/api/capabilities").json["gemini"])
+            self.assertNotIn("g-secret", allowed.get("/").get_data(as_text=True))
 
 
 class TestRetentionAndPage(HostedBase):

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .llm import LLMError, strip_reasoning
 from .storage import stage_paths
+from .subtitles import write_srt
 from .textutil import escape_tags, fmt_time, gujarati_ratio, sha, write_json
 
 PROMPT_VERSION = "tone-v1"
@@ -282,6 +283,7 @@ def run_translation(
 
     final = [text or "" for text in translations]
     paths["translation_txt"].write_text(assemble_text(units, final) + "\n", encoding="utf-8")
+    write_srt(paths["translation_srt"], [{**unit, "text": text} for unit, text in zip(units, final)])
     write_json(
         paths["translation_json"],
         {
@@ -309,4 +311,4 @@ def run_translation(
         bilingual_markdown(data.get("source") or transcript_json.stem, units, final), encoding="utf-8"
     )
     partial.unlink(missing_ok=True)
-    return {key: paths[key] for key in ("translation_txt", "translation_json", "bilingual")}
+    return {key: paths[key] for key in ("translation_txt", "translation_srt", "translation_json", "bilingual")}

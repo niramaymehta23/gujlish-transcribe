@@ -27,8 +27,8 @@ class Settings:
     max_upload_mb: float = 4096
     max_minutes: float = 0  # 0 = no length limit
     retention_hours: float = 0  # 0 = keep runs until you delete them
-    # Claude/Gemini run on the owner's API key, so a hosted site offers them only when explicitly allowed.
-    allow_cloud_llm: bool = True
+    # Gemini runs on the owner's API key, so a hosted site offers it only when explicitly allowed.
+    allow_gemini: bool = True
     models: tuple[str, ...] = field(default=MODELS)
 
     @classmethod
@@ -45,7 +45,7 @@ class Settings:
             max_upload_mb=_number("GUJLISH_MAX_UPLOAD_MB", 300 if hosted else 4096),
             max_minutes=_number("GUJLISH_MAX_MINUTES", 90 if hosted else 0),
             retention_hours=_number("GUJLISH_RETENTION_HOURS", 24 if hosted else 0),
-            allow_cloud_llm=_flag("GUJLISH_ALLOW_CLOUD_LLM") if hosted else True,
+            allow_gemini=_flag("GUJLISH_ALLOW_GEMINI") if hosted else True,
             models=models,
         )
         if hosted and len(settings.secret_key) < 32:

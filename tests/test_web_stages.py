@@ -60,50 +60,46 @@ class TestStages(unittest.TestCase):
         self.assertEqual(len(self.client.get("/api/history").json), 1)
 
     def test_capabilities_never_expose_the_key(self):
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-secret"}), patch("web.server.LocalLLM") as local:
-            local.return_value.base_url = "http://localhost:11434/v1"
-            local.return_value.models.return_value = ["llama3"]
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "g-secret"}):
             response = self.client.get("/api/capabilities")
-        self.assertEqual(response.json["claude"], True)
-        self.assertEqual(response.json["local_models"], ["llama3"])
-        self.assertNotIn("sk-secret", response.get_data(as_text=True))
-
-    def test_translate_validation(self):
-        self.assertEqual(self.post("translate", {"llm": "gpt"}).status_code, 400)
-        self.assertEqual(self.post("translate", {"llm": "local", "model": "--evil flag"}).status_code, 400)
+        self.assertEqual(response.json, {"hosted": False, "gemini": True})
+        self.assertNotIn("g-secret", response.get_data(as_text=True))
         with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(self.post("translate", {"llm": "claude"}).status_code, 400)
-            self.assertEqual(self.post("translate", {"llm": "gemini"}).status_code, 400)
+            self.assertFalse(self.client.get("/api/capabilities").json["gemini"])
+
+    def test_translate_needs_a_gemini_key(self):
+        with patch.dict("os.environ", {}, clear=True):
+            response = self.post("translate")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("GEMINI_API_KEY", response.json["error"])
         self.assertEqual(self.client.post("/api/jobs/nope/translate", json={}).status_code, 404)
-        with patch.dict("os.environ", {"GEMINI_API_KEY": "g"}):
-            self.assertEqual(self.post("translate", {"llm": "gemini"}).status_code, 202)
         self.assertEqual(
             self.client.post(f"/api/jobs/{self.job_id}/translate", headers={"Origin": "https://x.example"}).status_code,
             403,
         )
 
     def test_translate_queues_one_subprocess_and_rejects_a_second(self):
-        response = self.post("translate", {"llm": "local", "model": "qwen3:14b"})
-        self.assertEqual(response.status_code, 202)
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "g-secret"}):
+            response = self.post("translate", {"llm": "local", "model": "--evil flag"})  # ignored: Gemini only
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(self.post("translate").status_code, 409)
         function, (job_id, key, command) = self.executor.tasks[0]
         self.assertEqual(key, "translation")
         self.assertTrue(command[1].endswith("translate.py"))
-        self.assertIn("--llm-model=qwen3:14b", command)  # a single argument, never a loose value
-        self.assertNotIn("ANTHROPIC_API_KEY", " ".join(command))
-        self.assertEqual(self.post("translate", {"llm": "local"}).status_code, 409)
+        self.assertNotIn("--evil flag", command)
+        self.assertNotIn("g-secret", " ".join(command))  # the key reaches the subprocess only via its environment
         status = self.client.get(f"/api/jobs/{self.job_id}").json
         self.assertEqual(status["translation"]["status"], "queued")
 
     def test_summary_needs_a_translation_and_a_finished_transcript(self):
-        self.assertEqual(self.post("summarize", {"llm": "local"}).status_code, 409)
-        (self.run_dir / "talk.flex.en.txt").write_text("Today's talk", encoding="utf-8")
-        (self.run_dir / "talk.flex.en.json").write_text('{"kind": "translation", "segments": []}', encoding="utf-8")
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "k"}):
-            response = self.post("summarize", {"llm": "claude"})
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "g"}):
+            self.assertEqual(self.post("summarize").status_code, 409)
+            (self.run_dir / "talk.flex.en.txt").write_text("Today's talk", encoding="utf-8")
+            (self.run_dir / "talk.flex.en.json").write_text('{"kind": "translation", "segments": []}', encoding="utf-8")
+            response = self.post("summarize")
         self.assertEqual(response.status_code, 202)
         command = self.executor.tasks[0][1][2]
         self.assertTrue(command[1].endswith("summarize.py"))
-        self.assertIn("claude", command)
 
     def test_existing_files_count_as_complete_and_download(self):
         status = self.client.get(f"/api/jobs/{self.job_id}").json
@@ -123,6 +119,20 @@ class TestStages(unittest.TestCase):
             Document(io.BytesIO(response.data))
         with self.client.get(f"/api/jobs/{self.job_id}/download/summary-md") as response:
             self.assertEqual(response.status_code, 200)
+
+    def test_srt_downloads_for_transcript_and_translation(self):
+        with self.client.get(f"/api/jobs/{self.job_id}/download/srt") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("talk.flex.srt", response.headers["Content-Disposition"])
+            self.assertEqual(response.get_data(as_text=True), "1\n00:00:00,000 --> 00:00:05,000\nઆજે વાત\n")
+        self.assertEqual(self.client.get(f"/api/jobs/{self.job_id}/download/en-srt").status_code, 404)
+        (self.run_dir / "talk.flex.en.json").write_text(
+            '{"kind": "translation", "segments": [{"start": 0, "end": 5, "source": "આજે વાત", "text": "Today, a talk"}]}',
+            encoding="utf-8",
+        )
+        with self.client.get(f"/api/jobs/{self.job_id}/download/en-srt") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Today, a talk", response.get_data(as_text=True))
 
     def test_markdown_docx_structure(self):
         document = Document(
