@@ -35,6 +35,40 @@ Behavior that matters:
 
 The English is summarized in sections sized to the model's context (larger for Claude, smaller for local models), then merged in groups. The schema is fixed JSON (overview, themes with points, stories, quotes, asks, names, unclear). The model's times are snapped to actual segment starts, and each quote is checked against the translation text and marked as a paraphrase when it is not found. The summary is not checked against the original Gujarati, so errors in the translation carry through.
 
+## Translation prompt in brief
+
+**How the tone is kept.** Dedicated translation models take one instruction and offer no tone control, so tone comes from an instruction-following LLM. Each segment is translated with a brief describing the spoken register, the previous three segments with the English already produced (consistent names and phrasing), a short preview of the next segment, and your glossary. The model is told to translate meaning rather than words, carry over emotion and emphasis, use `[unclear]` instead of guessing, and treat transcript text as content, never instructions. `--tone faithful` gives a closer, plainer rendering; `--style-note "a village elder addressing a gathering"` adds context; `--glossary glossary.example.json` fixes names and terms.
+
+## Earlier decisions and trade-offs
+
+The project began as a single-file CLI. Stabilizing it required checking real upstream APIs and balancing recognition quality against runtime cost, generated-text risk, and operational simplicity.
+
+| Challenge | Decision and outcome | Remaining trade-off |
+| --- | --- | --- |
+| Gujarati–English code-switching | Keep Flex as the primary backend and pass `lang="gu", mode="mixed"` explicitly. Drop Whisper, which my own informal comparisons ranked below Flex. | Quality preference reflects practical observations, not a published benchmark from this project. |
+| Unsupported generated text | Add Gujlish CTC for comparison; keep transcripts free of generative grammar rewriting. | Neither architecture guarantees an error-free or hallucination-free transcript. |
+| Long recordings and memory | Stream FFmpeg PCM into bounded windows (27.5 s for Flex, 15.5 s for Gujlish) and cut each at the latest clean pause (at least 0.25 s). A forced cut with 0.4 s overlap is only the last resort. | Speech detectors are imperfect and a continuous speaker still forces cuts; full hour-long model inference remains unverified. |
+| Duplicate boundary text | Pause cuts need no de-duplication. Only forced cuts (which overlap) remove exact word suffix/prefix matches, ignoring edge punctuation and case. | This is a simple heuristic; it may miss partial-word duplicates or remove real repetition. |
+| Recognizer loops and silence | Flag repeated phrases and implausibly dense text, then re-decode that chunk in two halves; skip chunks with no speech. Text is never edited by the guards. | Thresholds are unmeasured heuristics; sparse output is flagged but not retried. |
+| Broken Gujlish loading example | Small-file checks showed missing processor configuration. Follow the author's raw-waveform and `vocab.json` inference path instead of `AutoProcessor`. | Upstream packaging changes can require loader updates. |
+| Meaningful confidence | Extract CTC softmax probabilities and greedy frame spans; expose Flex confidence as unavailable. | Model probability is not accuracy; timestamps are approximate, without forced alignment. |
+| Apple acceleration | Preserve the PyTorch backend and choose MPS when available. | CoreML/MLX conversion and a controlled M3 Pro throughput benchmark remain open work. |
+| Optional preprocessing | Default to plain decode → ASR; apply filters/corrections only on request. | Denoising can lose speech cues. CTC vocabulary correction requires low confidence; Flex supports exact supplied variants without a confidence gate. |
+| Progress after interruption | Atomically update one partial JSON and resume completed chunks. | Resume re-decodes earlier audio, and rewriting checkpoint JSON grows with the transcript. |
+| File clutter and comparisons | Replace per-chunk work folders with dated transcript runs and matching plot folders. | Run folders intentionally accumulate; you decide when to delete old ones. |
+| Unicode uploads and exports | Preserve Gujarati combining marks in filenames, number duplicates, and retain Unicode text in TXT/DOCX. | Display fonts vary across systems. |
+| Plotting in restricted environments | Use a headless Matplotlib backend and temporary writable cache. | Plotting is optional and deliberately excluded from the web UI. |
+
+Implementation testing also caught and corrected a NumPy view retaining a resizable audio buffer. The decoder now releases that view before removing consumed samples. These details, development stages, and verification evidence are recorded in the [process report](process-report.md).
+
+## What has been verified
+
+Completed development checks include real Flex inference in mixed/native modes, a short Flex CLI run, a 50-second Gujlish CLI run, a browser upload-to-transcript run, and one confidence PNG. Synthetic regression tests cover resume, overlapping text, file collisions, invalid audio, Unicode exports, run separation, history reconstruction, and WER/CER calculations.
+
+For the pause-aware chunking, boundaries were measured against a whole-file Silero VAD on real English speech: cuts landing inside speech fell from 8 of 8 (fixed) to 1 of 8, with no speech frames lost. That measures boundary quality, **not word error rate**: the Flex model could not be run in that test environment, so WER with and without pause chunking, the guard thresholds and the translation models on Gujarati are untested. The translation and summary stages were verified end to end with scripted stand-in servers, not with real Gujarati audio.
+
+These checks establish basic functionality. They do **not** establish dataset-level accuracy, hallucination rates, hour-long reliability, or fastest Apple GPU execution. No labeled corpus benchmark or controlled CoreML/MLX/MPS comparison has been completed. The web tool is intended for a single user on their own computer.
+
 ## Known gaps
 
 - No Gujarati reference set exists here, so neither WER nor translation quality has been measured.
