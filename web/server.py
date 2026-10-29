@@ -12,6 +12,7 @@ import tempfile
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,7 @@ import asr.storage as storage
 from asr.llm import gemini_available
 from asr.storage import ROOT, new_run, stage_paths
 from asr.subtitles import to_srt
+from web.documents import markdown_docx, transcript_docx
 from web.settings import Settings
 
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
@@ -33,6 +35,45 @@ UPLOAD_ID = re.compile(r"[0-9a-f]{32}")
 ACTIVE = {"queued", "loading", "transcribing"}
 SWEEP_EVERY_SECONDS = 600
 OWNER_FILE = ".owner"
+EVENT_PREFIX = "ASR_EVENT "
+
+
+@dataclass(frozen=True)
+class Stage:
+    """One English stage. Each goes by several names: job key ("translation"), URL (/translate), worker script,
+    output file, and progress event ("translating")."""
+
+    script: str
+    output: str  # key in asr.storage.stage_paths
+    verb: str
+
+
+STAGES = {
+    "translation": Stage("translate.py", "translation_txt", "Translating"),
+    "summary": Stage("summarize.py", "summary_md", "Summarizing"),
+}
+
+
+def stage_output(transcript_json: str, key: str) -> Path:
+    return stage_paths(Path(transcript_json))[STAGES[key].output]
+
+
+def run_worker(command: list[str], on_event) -> tuple[int, list[str]]:
+    """Run a worker script, passing each progress event to `on_event`; return its exit code and last log lines."""
+    logs: list[str] = []
+    with subprocess.Popen(
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    ) as worker:
+        for line in worker.stdout:
+            logs = [*logs, line.strip()][-LOG_TAIL_LINES:]
+            if line.startswith(EVENT_PREFIX):
+                on_event(json.loads(line[len(EVENT_PREFIX) :]))
+        return worker.wait(), logs
+
+
+def last_error(logs: list[str], fallback: str) -> str:
+    """The worker's final "Error: ..." line, or `fallback` when it printed none."""
+    return next((line.removeprefix("Error: ") for line in reversed(logs) if line.startswith("Error:")), fallback)
 
 
 def probe_audio(path: Path) -> float | None:
@@ -63,62 +104,6 @@ def probe_audio(path: Path) -> float | None:
         return duration if duration > 0 else None
     except (TypeError, ValueError):
         return None
-
-
-def _new_document(title: str):
-    # Keep the Python-only server small; standard Word paragraphs preserve Unicode.
-    from docx import Document
-    from docx.oxml.ns import qn
-    from docx.shared import Inches, Pt
-
-    document = Document()
-    section = document.sections[0]
-    section.page_width, section.page_height = Inches(8.27), Inches(11.69)
-    section.top_margin = section.bottom_margin = Inches(0.8)
-    normal = document.styles["Normal"]
-    normal.font.name, normal.font.size = "Nirmala UI", Pt(11)
-    normal.paragraph_format.line_spacing = 1.4
-    fonts = normal.element.get_or_add_rPr().get_or_add_rFonts()
-    fonts.set(qn("w:cs"), "Nirmala UI")
-    document.core_properties.title = title
-    return document
-
-
-def _saved(document) -> BytesIO:
-    buffer = BytesIO()
-    document.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-
-def transcript_docx(text: str, title: str) -> BytesIO:
-    document = _new_document(title)
-    for paragraph in text.splitlines() or [""]:
-        document.add_paragraph(paragraph)
-    return _saved(document)
-
-
-def markdown_docx(markdown: str, title: str) -> BytesIO:
-    """Render the summary's small Markdown subset (headings, bullets, quotes, bold/italic) as Word."""
-
-    def plain(text: str) -> str:
-        return re.sub(r"\*(.+?)\*", r"\1", re.sub(r"\*\*(.+?)\*\*", r"\1", text))
-
-    document = _new_document(title)
-    for line in markdown.splitlines():
-        if line.startswith("### "):
-            document.add_heading(plain(line[4:]), level=3)
-        elif line.startswith("## "):
-            document.add_heading(plain(line[3:]), level=2)
-        elif line.startswith("# "):
-            document.add_heading(plain(line[2:]), level=1)
-        elif line.startswith("- "):
-            document.add_paragraph(plain(line[2:]), style="List Bullet")
-        elif line.startswith("> "):
-            document.add_paragraph().add_run(plain(line[2:])).italic = True
-        elif line.strip():
-            document.add_paragraph(plain(line))
-    return _saved(document)
 
 
 def clean_filename(name: str) -> str:
@@ -204,56 +189,33 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     def process(job_id, source, run_dir, model, mode):
         update(job_id, status="loading", message="Loading the model. The first run may download model weights.")
-        logs = []
-        try:
-            command = [
-                sys.executable,
-                str(ROOT / "transcribe.py"),
-                str(source),
-                model,
-                "--mode",
-                mode,
-                "--output-dir",
-                str(run_dir),
-                "--progress-json",
-            ]
-            with subprocess.Popen(
-                command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            ) as worker:
-                for line in worker.stdout:
-                    logs.append(line.strip())
-                    logs = logs[-LOG_TAIL_LINES:]
-                    if line.startswith("ASR_EVENT "):
-                        event = json.loads(line[len("ASR_EVENT ") :])
-                        if event["stage"] == "transcribing":
-                            processed = event["processed"]
-                            total = jobs[job_id]["duration"]
-                            percent = min(99, round(processed / total * 100)) if total else None
-                            update(
-                                job_id,
-                                status="transcribing",
-                                processed=processed,
-                                progress=percent,
-                                message=f"Transcribing · {event['chunks']} chunks completed",
-                            )
-                        elif event["stage"] == "complete":
-                            update(job_id, txt=event["txt"], json=event["json"])
-                        elif event["stage"] == "loading":
-                            update(job_id, device=event["device"])
-                code = worker.wait()
-            if code or not jobs[job_id].get("txt"):
-                detail = next(
-                    (line.removeprefix("Error: ") for line in reversed(logs) if line.startswith("Error:")),
-                    "Transcription stopped. You can retry to resume completed chunks.",
+
+        def on_event(event):
+            if event["stage"] == "transcribing":
+                processed = event["processed"]
+                total = jobs[job_id]["duration"]
+                percent = min(99, round(processed / total * 100)) if total else None
+                update(
+                    job_id,
+                    status="transcribing",
+                    processed=processed,
+                    progress=percent,
+                    message=f"Transcribing · {event['chunks']} chunks completed",
                 )
-                raise RuntimeError(detail)
+            elif event["stage"] == "complete":
+                update(job_id, txt=event["txt"], json=event["json"])
+            elif event["stage"] == "loading":
+                update(job_id, device=event["device"])
+
+        command = [sys.executable, str(ROOT / "transcribe.py"), str(source), model, "--mode", mode]
+        command += ["--output-dir", str(run_dir), "--progress-json"]
+        try:
+            code, logs = run_worker(command, on_event)
+            if code or not jobs[job_id].get("txt"):
+                raise RuntimeError(last_error(logs, "Transcription stopped. You can retry to resume completed chunks."))
             update(job_id, status="complete", progress=100, message="Transcript ready")
         except Exception as error:
             update(job_id, status="error", message=str(error))
-
-    # Each English stage goes by several names: job key "translation" / "summary", URL /translate / /summarize,
-    # script translate.py / summarize.py, and progress event "translating" / "summarizing".
-    STAGE_WORDS = {"translation": "Translating", "summary": "Summarizing"}
 
     def set_stage(job_id, key, **fields):
         with lock:
@@ -261,34 +223,18 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     def run_stage(job_id, key, command):
         """Run translate.py / summarize.py as a subprocess, mirroring its progress events into the job."""
-        set_stage(job_id, key, status="running", progress=None, message=f"{STAGE_WORDS[key]}…")
-        logs = []
+        verb = STAGES[key].verb
+        set_stage(job_id, key, status="running", progress=None, message=f"{verb}…")
+
+        def on_event(event):
+            if event["stage"] in {"translating", "summarizing"} and event["total"]:
+                percent = min(99, round(event["done"] / event["total"] * 100))
+                set_stage(job_id, key, progress=percent, message=f"{verb} · {event['done']} of {event['total']}")
+
         try:
-            with subprocess.Popen(
-                command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            ) as worker:
-                for line in worker.stdout:
-                    logs.append(line.strip())
-                    logs = logs[-LOG_TAIL_LINES:]
-                    if line.startswith("ASR_EVENT "):
-                        event = json.loads(line[len("ASR_EVENT ") :])
-                        if event["stage"] in {"translating", "summarizing"} and event["total"]:
-                            percent = min(99, round(event["done"] / event["total"] * 100))
-                            set_stage(
-                                job_id,
-                                key,
-                                progress=percent,
-                                message=f"{STAGE_WORDS[key]} · {event['done']} of {event['total']}",
-                            )
-                code = worker.wait()
-            paths = stage_paths(Path(jobs[job_id]["json"]))
-            produced = paths["translation_txt"] if key == "translation" else paths["summary_md"]
-            if code or not produced.exists():
-                detail = next(
-                    (line.removeprefix("Error: ") for line in reversed(logs) if line.startswith("Error:")),
-                    f"{STAGE_WORDS[key]} stopped. Start it again to resume.",
-                )
-                raise RuntimeError(detail)
+            code, logs = run_worker(command, on_event)
+            if code or not stage_output(jobs[job_id]["json"], key).exists():
+                raise RuntimeError(last_error(logs, f"{verb} stopped. Start it again to resume."))
             set_stage(job_id, key, status="complete", progress=100, message="Ready")
         except Exception as error:
             set_stage(job_id, key, status="error", message=str(error))
@@ -298,11 +244,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         state = dict(job.get(key) or {})
         if state.get("status") in {"queued", "running", "error"}:
             return state
-        if job.get("json"):
-            paths = stage_paths(Path(job["json"]))
-            produced = paths["translation_txt"] if key == "translation" else paths["summary_md"]
-            if produced.exists():
-                return {"status": "complete", "progress": 100, "message": "Ready"}
+        if job.get("json") and stage_output(job["json"], key).exists():
+            return {"status": "complete", "progress": 100, "message": "Ready"}
         return state or {"status": "idle"}
 
     @app.before_request
@@ -498,8 +441,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return jsonify(error="This step is already running."), 409
             job[key] = {"status": "queued", "progress": None, "message": "Waiting for the current run…"}
             transcript_json = job["json"]
-        script = "translate.py" if key == "translation" else "summarize.py"
-        command = [sys.executable, str(ROOT / script), transcript_json, "--progress-json"]
+        command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
         pool.submit(run_stage, job_id, key, command)
         return jsonify(id=job_id), 202
 
