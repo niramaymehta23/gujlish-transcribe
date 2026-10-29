@@ -13,6 +13,10 @@ dist/
 !.env.example
 .idea/
 .vscode/
+# Per-machine Claude Code files: local paths, permissions and worktrees.
+.claude/launch.json
+.claude/settings.local.json
+.claude/worktrees/
 .cache/
 .aws/
 *.pem
