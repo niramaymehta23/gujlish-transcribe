@@ -96,14 +96,20 @@ Open **[http://localhost:8765](http://localhost:8765)** in your browser. To stop
 
 Then:
 
-1. **Add a recording.** Drop it on the page or click to choose a file. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV).
-2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can be *Mixed* (Gujarati script plus English in English letters, the default) or *Native* (everything in Gujarati script). **Gujlish** is a smaller comparison model.
-3. **Click Transcribe recording.** The progress bar follows the audio processed so far. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
+1. **Add a recording.** Drop it anywhere on the page or click **New recording**. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV). If it is a recording you have already transcribed (even renamed), the app asks whether to open that one instead. The app recognises recordings by a fingerprint of the audio, keeps one copy of each, and never uploads audio it already has.
+2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can keep English words in English letters (the default) or write everything in Gujarati script. **Gujlish** is a smaller comparison model.
+3. **Click Transcribe.** The recording appears under **Recordings** with its progress, and you can open other recordings while it works. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
 4. **Fix any misheard words** in the **Gujarati** or **Gujlish** tab (see [below](#fix-words-and-build-your-dictionary)).
 5. **Read, copy or download** each version as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
 6. **Optional:** once the words are right, open **English** or **Summary** and click **Translate & summarize** (see [below](#translate-to-english-and-summarize-optional)).
 
-**Previous runs** on the left reopens earlier transcripts, even after restarting the app. If a run fails or you stop it, **Retry & resume** continues from the last finished chunk instead of starting over.
+**Recordings** on the left lists every run and what it is doing, even after restarting the app. While a recording is being transcribed you can:
+
+- **Pause** it: finished chunks are kept, and **Resume** continues from there.
+- **Cancel** it: after asking, the run and its uploaded recording are deleted. A finished run has **Delete** instead.
+- **Stop** the English and summary while they run. Starting again continues where it left off.
+
+Transcription and the Gemini steps have separate queues, so a translation never waits for a transcription. If the app stops in the middle of a run (or a hosted server restarts), it picks the work up again by itself the next time it starts.
 
 Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Neither folder is ever uploaded to GitHub.
 

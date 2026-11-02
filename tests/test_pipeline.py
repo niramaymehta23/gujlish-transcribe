@@ -176,8 +176,10 @@ class TestWorkflow(unittest.TestCase):
                 self.assertEqual(response.status_code, 202)
                 ids.append(response.json["id"])
             jobs = app.extensions["asr_jobs"]
-            self.assertEqual(jobs[ids[0]]["name"], "વાત.wav")
-            self.assertEqual(jobs[ids[1]]["name"], "વાત-2.wav")
+            self.assertEqual([jobs[job_id]["name"] for job_id in ids], ["વાત.wav", "વાત.wav"])
+            # The same audio twice is stored once and shared by both runs.
+            self.assertEqual(jobs[ids[0]]["source"], jobs[ids[1]]["source"])
+            self.assertEqual([path.name for path in (self.root / "recordings").glob("*.wav")], ["વાત.wav"])
             response = client.post("/api/jobs", data={"audio": (io.BytesIO(b"bad audio"), "bad.mp3")})
             self.assertEqual(response.status_code, 400)
             self.assertFalse((self.root / "recordings" / "bad.mp3").exists())

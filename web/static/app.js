@@ -1,10 +1,14 @@
 const $ = id => document.getElementById(id);
-let jobId = null, pollTimer = null, pollFailures = 0;
-let current = null, renderedFor = null, renderedRev = null, caps = null, tab = 'transcript', stageNotice = '';
+// runs: the sidebar list. jobId: the run on screen ('upload' while a file is uploading). current: its finished transcript.
+let runs = [], jobId = null, shown = null, current = null, upload = null;
+let pollTimer = null, runsTimer = null, pollFailures = 0, noticeTimer = null;
+let renderedFor = null, renderedRev = null, caps = null, tab = 'transcript', stageNotice = '';
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
 const TABS = ['transcript', 'gujlish', 'translation', 'summary'];
 const WORD_TABS = ['transcript', 'gujlish'];
 const STAGE_KEYS = ['gujlish', 'translation', 'summary'];
+const ACTIVE = ['queued', 'loading', 'transcribing'];
+const STOPPED = 'Stopped. Start it again to continue where it left off.';  // web.server.STOPPED
 const HOSTED = document.body.dataset.hosted === '1';
 const CHUNK_BYTES = Number(document.body.dataset.chunkBytes) || 8 * 1024 * 1024;
 const MAX_UPLOAD_MB = Number(document.body.dataset.maxUploadMb) || 4096;
@@ -14,42 +18,41 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // A 401 means the site's password session ended: go back to the sign-in page.
 const signedOut = response => { if (response.status === 401) { location.href = '/login'; return true; } return false; };
 const time = seconds => `${Math.floor((seconds || 0) / 60)}:${String(Math.floor((seconds || 0) % 60)).padStart(2, '0')}`;
+const minutes = seconds => !seconds ? '' : seconds < 60 ? `${Math.round(seconds)} s` : `${Math.round(seconds / 60)} min`;
+const when = iso => iso ? new Date(iso).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : '';
+const mb = bytes => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 const running = state => Boolean(state) && (state.status === 'queued' || state.status === 'running');
+const busyRun = run => ACTIVE.includes(run.status) || STAGE_KEYS.some(key => running(run[key]));
 const words = text => (text || '').split(/\s+/).filter(Boolean);
 const bare = text => words(text).map(word => word.replace(EDGE, '')).filter(Boolean).join(' ');
 const wordKey = word => word.normalize('NFC').toLowerCase().replace(EDGE, '');
 const postJson = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-function show(state) {
-  for (const id of ['empty-state','processing','error-state','result']) $(id).hidden = id !== state;
-}
-function setBusy(busy) {
-  $('start-button').disabled = busy;
-  $('model').disabled = busy;
-  $('mode').disabled = busy;
-  $('audio-input').disabled = busy;
-}
-function progress(percent) {
-  $('progress-fill').classList.toggle('indeterminate', percent === null);
-  $('progress-fill').style.width = percent === null ? '' : `${percent}%`;
-  $('progress-percent').textContent = percent === null ? '' : `${percent}%`;
-}
-function selectedFile() {
-  const file = $('audio-input').files[0];
-  $('file-name').textContent = file ? file.name : 'Drop an audio file here';
-  $('file-detail').textContent = file ? `${(file.size / 1024 / 1024).toFixed(1)} MB · ready to transcribe` : 'or click to choose a file';
-}
-$('audio-input').addEventListener('change', selectedFile);
-for (const event of ['dragenter','dragover']) $('dropzone').addEventListener(event, e => { e.preventDefault(); $('dropzone').classList.add('dragging'); });
-for (const event of ['dragleave','drop']) $('dropzone').addEventListener(event, e => { e.preventDefault(); $('dropzone').classList.remove('dragging'); });
-$('dropzone').addEventListener('drop', e => { if ($('audio-input').disabled) return; if (e.dataTransfer.files.length) { const transfer = new DataTransfer(); transfer.items.add(e.dataTransfer.files[0]); $('audio-input').files = transfer.files; selectedFile(); } });
-$('model').addEventListener('change', () => { $('mode-field').hidden = $('model').value === 'gujlish'; if ($('mode-field').hidden) $('mode').value = 'mixed'; });
-function fail(message, retry = false) {
-  show('error-state'); $('error-message').textContent = message;
-  $('retry-button').hidden = !retry; setBusy(false);
-}
+const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+
 function note(text) {
   clearTimeout(noteTimer); $('edit-note').textContent = text;
   noteTimer = setTimeout(() => { $('edit-note').textContent = ''; }, 6000);
+}
+function notice(text) {
+  clearTimeout(noticeTimer); $('run-notice').textContent = text;
+  if (text) noticeTimer = setTimeout(() => { $('run-notice').textContent = ''; }, 8000);
+}
+// A small popup with a few choices; resolves to the chosen value, or null if closed.
+function ask(title, text, actions) {
+  return new Promise(resolve => {
+    const modal = $('modal');
+    $('modal-title').textContent = title; $('modal-text').textContent = text;
+    $('modal-actions').replaceChildren(...actions.map(({ label, value, kind }) => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = kind || 'secondary'; button.textContent = label;
+      button.onclick = () => { resolve(value); modal.close(); };
+      return button;
+    }));
+    modal.onclose = () => resolve(null);
+    modal.showModal();
+    // Enter should never delete: focus the safe choice when the first one is destructive.
+    const buttons = [...$('modal-actions').children];
+    (buttons.find(button => !button.classList.contains('danger')) || buttons[0]).focus();
+  });
 }
 
 // Summary text comes from a model, so it is rendered with DOM nodes (never innerHTML).
@@ -80,6 +83,326 @@ function renderMarkdown(element, markdown) {
   }
 }
 
+// ---- The sidebar: every run with what it is doing now ----
+function runBadge(run) {
+  const percent = run.progress != null ? ` ${run.progress}%` : '';
+  if (run.status === 'queued') return ['Waiting', 'busy'];
+  if (run.status === 'loading') return ['Starting', 'busy'];
+  if (run.status === 'transcribing') return [`Transcribing${percent}`, 'busy'];
+  if (run.status === 'paused') return ['Paused', 'paused'];
+  if (run.status === 'error') return ['Stopped', 'error'];
+  for (const [key, verb] of [['translation', 'Translating'], ['summary', 'Summarizing'], ['gujlish', 'Gujlish']]) {
+    const state = run[key];
+    if (running(state)) return [state.status === 'queued' ? `${verb} soon` : `${verb}${state.progress != null ? ` ${state.progress}%` : ''}`, 'busy'];
+  }
+  return null;
+}
+function runItem({ id, name, detail, badge, progress, selected }) {
+  const item = document.createElement('button'); item.type = 'button'; item.className = 'run-item';
+  item.classList.toggle('selected', selected); item.setAttribute('aria-current', selected ? 'true' : 'false');
+  const title = document.createElement('span'); title.className = 'run-name'; title.textContent = name;
+  const meta = document.createElement('span'); meta.className = 'run-detail'; meta.textContent = detail;
+  item.append(title, meta);
+  if (badge) { const tag = document.createElement('span'); tag.className = `badge ${badge[1]}`; tag.textContent = badge[0]; item.append(tag); }
+  if (progress != null) { const bar = document.createElement('span'); bar.className = 'mini-bar'; const fill = document.createElement('i'); fill.style.width = `${progress}%`; bar.append(fill); item.append(bar); }
+  item.onclick = () => { select(id); if (narrow()) $('main').scrollIntoView({ behavior: 'smooth' }); };
+  return item;
+}
+function renderRuns() {
+  const items = [];
+  if (upload) items.push(runItem({ id: 'upload', name: upload.name, detail: upload.error ? 'Upload failed' : `Uploading · ${mb(upload.size)}`,
+    badge: upload.error ? ['Failed', 'error'] : [`${upload.percent}%`, 'busy'], progress: upload.error ? null : upload.percent, selected: jobId === 'upload' }));
+  for (const run of runs) {
+    const badge = runBadge(run);
+    items.push(runItem({ id: run.id, name: run.name, detail: [when(run.started), minutes(run.duration)].filter(Boolean).join(' · '),
+      badge, progress: run.status === 'transcribing' ? run.progress : null, selected: run.id === jobId }));
+  }
+  if (!items.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No recordings yet. Add one above.'; items.push(p); }
+  $('history').replaceChildren(...items);
+  $('runs-count').textContent = runs.length || '';
+}
+async function loadRuns() {
+  clearTimeout(runsTimer);
+  try {
+    const response = await fetch('/api/history');
+    if (signedOut(response)) return;
+    if (response.ok) { runs = await response.json(); renderRuns(); }
+  } catch { /* the server may be restarting: try again shortly */ }
+  runsTimer = setTimeout(loadRuns, upload || runs.some(busyRun) ? 3000 : 20000);
+}
+function mergeRun(job) {
+  const run = runs.find(item => item.id === job.id);
+  if (!run) return;
+  for (const key of ['status', 'progress', 'message', 'duration', ...STAGE_KEYS]) run[key] = job[key];
+  renderRuns();
+}
+function sideTab(name) {
+  $('side-runs').setAttribute('aria-selected', String(name === 'runs')); $('side-dict').setAttribute('aria-selected', String(name === 'dict'));
+  $('runs-pane').hidden = name !== 'runs'; $('dict-pane').hidden = name !== 'dict';
+}
+$('side-runs').addEventListener('click', () => sideTab('runs'));
+$('side-dict').addEventListener('click', () => sideTab('dict'));
+
+// ---- The run on screen ----
+function view(name) {  // 'empty', 'status' or 'result'
+  $('empty-state').hidden = name !== 'empty';
+  $('run-view').hidden = name === 'empty';
+  $('processing').hidden = name !== 'status';
+  $('result').hidden = name !== 'result';
+}
+function select(id) {
+  clearTimeout(pollTimer); closeEditor(); notice('');
+  jobId = id; shown = null; current = null; renderedFor = null; renderedRev = null; stageNotice = '';
+  if (id && id !== 'upload') sessionStorage.setItem('asr-job', id); else sessionStorage.removeItem('asr-job');
+  renderRuns();
+  if (!id) return view('empty');
+  if (id === 'upload') return renderUpload();
+  const run = runs.find(item => item.id === id);
+  renderHead(run || { name: 'Opening…', status: 'loading' });
+  view('status'); $('status-label').textContent = 'Opening…'; $('status-detail').textContent = ''; progress(null);
+  $('progress-description').textContent = ''; $('spinner').hidden = false;
+  pollFailures = 0; poll();
+}
+function progress(percent, still) {
+  $('progress-fill').classList.toggle('indeterminate', percent == null && !still);
+  $('progress-fill').style.width = percent == null ? (still ? '0' : '') : `${percent}%`;
+  $('progress-percent').textContent = percent == null ? '' : `${percent}%`;
+}
+function stateLabel(job) {
+  const badge = runBadge(job);
+  if (job.status === 'complete') return badge || ['Ready', 'ready'];
+  return badge || [job.status, 'busy'];
+}
+function renderHead(job) {
+  $('run-title').textContent = job.name || '';
+  const script = job.mode === 'native' ? 'Gujarati script' : job.mode === 'mixed' ? 'English words in English letters' : '';
+  $('run-meta').textContent = [when(job.started), minutes(job.duration), script].filter(Boolean).join(' · ');
+  const [label, kind] = stateLabel(job);
+  $('run-state').textContent = label; $('run-state').className = `state ${kind}`;
+  const active = ACTIVE.includes(job.status), stopped = job.status === 'paused' || job.status === 'error';
+  $('pause-button').hidden = !active;
+  $('resume-button').hidden = !stopped;
+  $('delete-button').hidden = false;
+  $('delete-button').textContent = job.status === 'complete' ? 'Delete' : 'Cancel';
+}
+function renderStatus(job) {
+  view('status');
+  const active = ACTIVE.includes(job.status);
+  $('spinner').hidden = !active;
+  $('processing').classList.toggle('stopped', !active);
+  $('status-label').textContent = {
+    queued: job.ahead ? `Waiting · ${job.ahead} recording${job.ahead === 1 ? '' : 's'} ahead` : 'Waiting to start…',
+    loading: 'Preparing transcription…', transcribing: 'Transcribing…', paused: 'Paused', error: 'Stopped',
+  }[job.status] || job.message;
+  $('status-detail').textContent = job.message + (active && job.device ? ` · ${job.device.toUpperCase()}` : '');
+  const processed = job.processed ? `${time(job.processed)}${job.duration ? ` / ${time(job.duration)}` : ''} audio done` : '';
+  $('progress-description').textContent = job.status === 'transcribing' || !active ? processed : 'Progress begins when the model is ready';
+  progress(job.status === 'transcribing' || !active ? (job.progress ?? (active ? null : 0)) : null, !active);
+}
+function renderUpload() {
+  if (!upload) return select(null);
+  renderHead({ name: upload.name, status: 'loading' });
+  $('run-meta').textContent = mb(upload.size);
+  $('run-state').textContent = upload.error ? 'Failed' : 'Uploading'; $('run-state').className = `state ${upload.error ? 'error' : 'busy'}`;
+  $('pause-button').hidden = true; $('resume-button').hidden = true;
+  $('delete-button').textContent = upload.error ? 'Dismiss' : 'Cancel upload';
+  view('status');
+  $('spinner').hidden = Boolean(upload.error); $('processing').classList.toggle('stopped', Boolean(upload.error));
+  $('status-label').textContent = upload.error ? 'Upload failed' : upload.checking ? 'Checking the audio…' : 'Uploading recording…';
+  $('status-detail').textContent = upload.error || (HOSTED ? 'Sending your recording to the server. You can open other recordings meanwhile.' : 'Saving your recording to the local workspace.');
+  $('progress-description').textContent = 'Uploaded';
+  progress(upload.checking ? null : upload.percent, Boolean(upload.error));
+}
+async function poll() {
+  clearTimeout(pollTimer);
+  const id = jobId;
+  if (!id || id === 'upload') return;
+  try {
+    const response = await fetch(`/api/jobs/${id}`);
+    if (signedOut(response) || jobId !== id) return;
+    if (response.status === 404) {
+      runs = runs.filter(run => run.id !== id); select(null); loadRuns(); return;
+    }
+    if (!response.ok) throw new Error('Could not read progress.');
+    const job = await response.json();
+    if (jobId !== id) return;
+    pollFailures = 0; shown = job;
+    mergeRun(job); renderHead(job);
+    if (job.status === 'complete') {
+      renderResult(job);
+      if (STAGE_KEYS.some(key => running(job[key]))) pollTimer = setTimeout(poll, 1500);
+      return;
+    }
+    current = null; renderStatus(job);
+    if (ACTIVE.includes(job.status)) pollTimer = setTimeout(poll, 1000);
+  } catch {
+    if (jobId !== id) return;
+    // Cloud Run sometimes swaps the server's machine; the new one picks the run up again within seconds.
+    pollFailures++;
+    if (pollFailures > 2) notice(`Reconnecting to ${SERVER}…`);
+    pollTimer = setTimeout(poll, Math.min(10000, 1000 * pollFailures));
+  }
+}
+function renderResult(job) {
+  const first = renderedFor !== job.id;
+  current = job; view('result');
+  if (pollFailures === 0 && $('run-notice').textContent.startsWith('Reconnecting')) notice('');
+  if (first || job.rev !== renderedRev) {
+    renderedRev = job.rev;
+    renderWords($('transcript'), false); renderWords($('gujlish'), true); markSelection();
+  }
+  $('translation').textContent = job.translation_text || '';
+  if (job.summary_markdown) renderMarkdown($('summary'), job.summary_markdown); else $('summary').replaceChildren();
+  markTabs();
+  if (first) { renderedFor = job.id; setTab('transcript'); loadCaps(); }
+  else { updateExports(); updateStageBox(); }
+}
+
+// ---- Pause, resume, cancel and delete ----
+async function act(path, body) {
+  const id = jobId;
+  try {
+    const response = await postJson(`/api/jobs/${id}/${path}`, body);
+    if (signedOut(response)) return false;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { notice(data.error || 'That did not work. Try again.'); return false; }
+    return true;
+  } catch { notice(`Could not reach ${SERVER}.`); return false; }
+  finally { if (jobId === id && path !== 'delete') { pollFailures = 0; poll(); } loadRuns(); }
+}
+$('pause-button').addEventListener('click', () => act('pause'));
+$('resume-button').addEventListener('click', () => act('resume'));
+$('delete-button').addEventListener('click', async () => {
+  if (jobId === 'upload') {
+    if (upload && !upload.error && !await ask('Cancel this upload?', `“${upload.name}” stops uploading and is not transcribed.`,
+      [{ label: 'Cancel upload', value: true, kind: 'primary danger' }, { label: 'Keep uploading', value: false }])) return;
+    if (upload) upload.controller.abort();
+    upload = null; select(null); return;
+  }
+  const job = shown || runs.find(run => run.id === jobId);
+  if (!job) return;
+  const finished = job.status === 'complete';
+  const yes = await ask(finished ? 'Delete this recording?' : 'Cancel this recording?',
+    finished ? `“${job.name}” and its transcript, Gujlish, English and summary are deleted. Fixes already in your dictionary stay.`
+      : `“${job.name}” stops, and the recording and the progress so far are deleted.`,
+    [{ label: finished ? 'Delete' : 'Cancel recording', value: true, kind: 'primary danger' }, { label: 'Keep it', value: false }]);
+  if (!yes) return;
+  const id = jobId;
+  if (await act('delete')) { runs = runs.filter(run => run.id !== id); if (jobId === id) select(null); }
+});
+
+// ---- Adding a recording: uploads carry on in the background while you look at other runs ----
+function chosen() {
+  const file = $('audio-input').files[0];
+  $('file-name').textContent = file ? file.name : 'New recording';
+  $('file-detail').textContent = file ? `${mb(file.size)} · ready to transcribe` : 'Drop audio here or click to choose';
+  $('start-row').hidden = !file; $('dropzone').classList.toggle('chosen', Boolean(file));
+}
+function clearFile() { $('audio-input').value = ''; chosen(); }
+function takeFile(file) {
+  if (!file) return;
+  const transfer = new DataTransfer(); transfer.items.add(file); $('audio-input').files = transfer.files; chosen();
+  sideTab('runs'); $('start-button').focus();
+}
+$('audio-input').addEventListener('change', chosen);
+$('clear-file').addEventListener('click', clearFile);
+let dragDepth = 0;
+window.addEventListener('dragenter', e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); dragDepth++; $('drop-overlay').hidden = false; } });
+window.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); });
+window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop-overlay').hidden = true; } });
+window.addEventListener('drop', e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); dragDepth = 0; $('drop-overlay').hidden = true; takeFile(e.dataTransfer.files[0]); });
+
+async function fingerprintOf(file) {  // SHA-256 of the file, as web/recordings.py computes it; null if unavailable
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  } catch { return null; }
+}
+async function uploadInPieces(file, signal) {
+  // Sent in pieces because hosting platforms cap the size of one request; offsets make a resent piece harmless.
+  const started = await fetch('/api/uploads', { method: 'POST', signal });
+  if (signedOut(started)) return null;
+  if (!started.ok) throw new Error('Could not start the upload.');
+  const { id } = await started.json();
+  let offset = 0;
+  while (offset < file.size) {
+    let response = null;
+    for (let attempt = 0; ; attempt++) {
+      try { response = await fetch(`/api/uploads/${id}?offset=${offset}`, { method: 'PUT', body: file.slice(offset, offset + CHUNK_BYTES), signal }); break; }
+      catch (error) { if (signal.aborted) throw error; if (attempt >= 5) throw new Error(`Lost the connection to ${SERVER} during upload.`); await sleep(1500 * (attempt + 1)); }
+    }
+    if (signedOut(response)) return null;
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && Number.isInteger(data.received)) { offset = data.received; continue; }
+    if (!response.ok) throw new Error(data.error || 'Upload failed. Please try again.');
+    offset = data.received;
+    upload.percent = Math.round(offset / file.size * 100);
+    renderRuns(); if (jobId === 'upload') renderUpload();
+  }
+  return id;
+}
+$('upload-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const file = $('audio-input').files[0];
+  if (!file) return;
+  if (upload && !upload.error) return ask('One upload at a time', `“${upload.name}” is still uploading. Add this one when it has finished.`, [{ label: 'OK', value: true, kind: 'primary' }]);
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return ask('This file is too large', `Files up to ${MAX_UPLOAD_MB} MB can be added here.`, [{ label: 'OK', value: true, kind: 'primary' }]);
+  // The server knows recordings by a fingerprint of their audio, so a renamed copy is recognised too, and audio it
+  // already has is never uploaded again.
+  $('start-button').disabled = true; $('file-detail').textContent = 'Checking whether you already have it…';
+  const print = await fingerprintOf(file);
+  let known = { stored: false, runs: [] };
+  try {
+    const response = print ? await fetch(`/api/recordings/${print}`) : null;
+    if (response && signedOut(response)) return;
+    if (response && response.ok) known = await response.json();
+  } catch { /* checking is optional: upload as usual */ }
+  finally { $('start-button').disabled = false; chosen(); }
+  const same = known.runs[0];
+  if (same) {
+    const others = known.runs.length > 1 ? ` (and ${known.runs.length - 1} more)` : '';
+    const choice = await ask('You already have this recording',
+      `“${same.name}”${same.started ? `, added ${when(same.started)},` : ''}${others} has exactly the same audio.`,
+      [{ label: 'Open it', value: 'open', kind: 'primary' }, { label: 'Transcribe again', value: 'again' }, { label: 'Cancel', value: null }]);
+    if (choice === 'open') { clearFile(); select(same.id); return; }
+    if (choice !== 'again') return;
+  }
+  const form = new FormData(); form.append('model', $('model').value); form.append('mode', $('mode').value); form.append('name', file.name);
+  clearFile();  // so a second click cannot send it again
+  upload = { name: file.name, size: file.size, percent: 0, error: '', controller: new AbortController() };
+  const mine = upload;
+  select('upload'); loadRuns();
+  const start = () => fetch('/api/jobs', { method: 'POST', body: form, signal: mine.controller.signal });
+  try {
+    let response = null;
+    if (known.stored) {  // the server has this audio already: start straight away
+      form.append('fingerprint', print); mine.checking = true; if (jobId === 'upload') renderUpload();
+      response = await start();
+      if (signedOut(response)) return;
+      if (response.status === 409) { form.delete('fingerprint'); mine.checking = false; response = null; }  // gone since
+    }
+    if (!response) {
+      const uploadId = await uploadInPieces(file, mine.controller.signal);
+      if (!uploadId) return;
+      form.append('upload_id', uploadId);
+      mine.checking = true; if (jobId === 'upload') renderUpload();
+      response = await start();
+      if (signedOut(response)) return;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (response.status !== 202) throw new Error(data.error || 'Upload failed. Please try again.');
+    const watching = jobId === 'upload';
+    upload = null;
+    await loadRuns();
+    if (watching) select(data.id); else renderRuns();
+  } catch (error) {
+    if (mine.controller.signal.aborted || upload !== mine) return;
+    upload.error = error.message || `Could not connect to ${SERVER}.`; upload.checking = false;
+    renderRuns(); if (jobId === 'upload') renderUpload();
+  }
+});
+
+// ---- Result views ----
 // Gujarati and Gujlish are shown one segment per line, each word its own element, so a click picks a word and
 // word N of a line is the same word in both views.
 function segmentWords(index, latin) {
@@ -150,17 +473,18 @@ function updateStageBox() {
     if (!gemini) { label = null; unavailable = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate and summarize, set GEMINI_API_KEY in the terminal and restart the app (see the README).'; }
   }
   const busy = running(state) || (key === 'english' && (running(stageState('translation')) || running(stageState('summary'))));
+  box.classList.toggle('compact', !busy && key === 'english' && Boolean(current.translation_text) && !current.english_stale && !current.summary_stale);
   $('stage-explain').textContent = explain;
-  $('llm-note').hidden = key !== 'english' || !gemini;
-  $('stage-button').hidden = !label; $('stage-button').textContent = label || '';
-  $('stage-button').disabled = busy;
-  $('stage-alt').hidden = !alt; $('stage-alt').disabled = busy;
+  $('llm-note').hidden = key !== 'english' || !gemini || busy;
+  $('stage-button').hidden = !label || busy; $('stage-button').textContent = label || '';
+  $('stage-stop').hidden = !busy;
+  $('stage-alt').hidden = !alt || busy;
   $('stage-track').hidden = !busy;
   $('stage-fill').classList.toggle('indeterminate', busy && state.progress == null);
   $('stage-fill').style.width = busy && state.progress != null ? `${state.progress}%` : '';
   let status = '';
   if (stageNotice) status = stageNotice;
-  else if (busy || state.status === 'error') status = state.message || '';
+  else if (busy || state.status === 'error' || state.message === STOPPED) status = state.message || '';
   else if (unavailable) status = unavailable;
   $('stage-status').textContent = status;
 }
@@ -200,13 +524,36 @@ function markTabs() {
     ['summary', 'Summary', Boolean(current.summary_markdown), current.summary_stale],
   ];
   for (const [id, name, has, stale] of tabs) {
-    const label = $(`tab-${id}`); label.replaceChildren(name);
-    if (has) { const dot = document.createElement('span'); dot.className = stale ? 'dot stale' : 'dot'; dot.title = stale ? 'Made before your latest fixes' : ''; label.append(dot); }
+    const label = $(`tab-${id}`), state = current[id]; label.replaceChildren(name);
+    if (running(state)) {
+      const work = document.createElement('span'); work.className = 'tab-work';
+      work.textContent = state.status === 'running' && state.progress != null ? `${state.progress}%` : '…';
+      label.append(work);
+    } else if (has) { const dot = document.createElement('span'); dot.className = stale ? 'dot stale' : 'dot'; dot.title = stale ? 'Made before your latest fixes' : ''; label.append(dot); }
   }
 }
+async function startStage(path, body) {
+  if (!current) return;
+  stageNotice = ''; $('stage-button').disabled = true; $('stage-alt').disabled = true;
+  try {
+    const response = await postJson(`/api/jobs/${jobId}/${path}`, body);
+    if (signedOut(response)) return;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { stageNotice = data.error || 'Could not start this step.'; updateStageBox(); return; }
+    pollFailures = 0; poll(); loadRuns();
+  } catch { stageNotice = `Could not reach ${SERVER}.`; updateStageBox(); }
+  finally { $('stage-button').disabled = false; $('stage-alt').disabled = false; }
+}
+$('stage-button').addEventListener('click', () => startStage(stageBoxKey() === 'gujlish' ? 'gujlish' : 'english'));
+$('stage-alt').addEventListener('click', () => startStage('gujlish', { engine: 'gemini' }));
+$('stage-stop').addEventListener('click', () => act('stop', { stage: stageBoxKey() === 'gujlish' ? 'gujlish' : 'english' }));
+$('copy-button').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(tabText(tab)); $('copy-button').textContent = 'Copied ✓'; setTimeout(() => $('copy-button').textContent = 'Copy text', 2000); }
+  catch { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents($(tab)); selection.removeAllRanges(); selection.addRange(range); $('copy-button').textContent = 'Select & copy'; }
+});
 
-// The word editor: pick words in the Gujarati or Gujlish, type the right word in either script, and save. Typing
-// Gujlish fills in the Gujarati (and suggests spellings); typing Gujarati fills in the Gujlish.
+// ---- The word editor: pick words in the Gujarati or Gujlish, type the right word in either script, and save.
+// Typing Gujlish fills in the Gujarati (and suggests spellings); typing Gujarati fills in the Gujlish.
 function selectedText(latin) { return segmentWords(sel.seg, latin).slice(sel.start, sel.end).join(' '); }
 function countMatches(heard) {
   const key = words(heard).map(wordKey);
@@ -240,12 +587,13 @@ function openEditor() {
 function closeEditor() { $('editor').hidden = true; sel = null; markSelection(); }
 function placeEditor() {
   const editor = $('editor');
-  if (editor.hidden || !sel || window.matchMedia('(max-width: 760px)').matches) return;  // phones: a bottom sheet
+  if (editor.hidden || !sel || narrow()) return;  // phones: a bottom sheet
   const last = $(tab).querySelector(`.words[data-seg="${sel.seg}"] .w[data-i="${sel.end - 1}"]`);
   if (!last) return;
   const box = last.getBoundingClientRect(), right = document.documentElement.clientWidth - editor.offsetWidth - 8;
+  const below = box.bottom + 8 + editor.offsetHeight < window.innerHeight ? box.bottom + 8 : Math.max(8, box.top - editor.offsetHeight - 8);
   editor.style.left = `${window.scrollX + Math.max(8, Math.min(box.left, right))}px`;
-  editor.style.top = `${window.scrollY + box.bottom + 8}px`;
+  editor.style.top = `${window.scrollY + below}px`;
 }
 function pick(seg, start, end) { sel = { seg, start, end }; openEditor(); }
 for (const id of WORD_TABS) {
@@ -342,7 +690,7 @@ async function loadDictionary() {
     const response = await fetch('/api/dictionary');
     if (signedOut(response) || !response.ok) return;
     const data = await response.json();
-    $('dict-count').textContent = data.corrections.length ? `· ${data.corrections.length}` : '';
+    $('dict-count').textContent = data.corrections.length || '';
     const rows = data.corrections.map(rule => dictionaryRow(`${rule.heard} → ${rule.correct}`,
       rule.heard_gujlish && rule.correct_gujlish ? `${rule.heard_gujlish} → ${rule.correct_gujlish}` : '', { correction: rule.id }));
     if (!rows.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No fixes yet. Click a word in a transcript to fix it.'; rows.push(p); }
@@ -360,128 +708,18 @@ function dictionaryRow(text, detail, forget) {
   const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'forget'; remove.textContent = '×';
   remove.title = 'Forget'; remove.setAttribute('aria-label', `Forget ${text}`);
   remove.onclick = async () => {
-    if (!confirm(`Forget “${text}”? Future recordings will no longer get this fix.`)) return;
+    if (!await ask(`Forget “${text}”?`, 'Future recordings will no longer get this fix.', [{ label: 'Forget', value: true, kind: 'primary danger' }, { label: 'Keep', value: false }])) return;
     try { const response = await postJson('/api/dictionary/forget', forget); if (!signedOut(response)) loadDictionary(); } catch { /* retry by clicking again */ }
   };
   row.append(label, remove);
   return row;
 }
 
-async function uploadInPieces(file) {
-  // Sent in pieces because hosting platforms cap the size of one request; offsets make a resent piece harmless.
-  const started = await fetch('/api/uploads', { method: 'POST' });
-  if (signedOut(started)) return null;
-  if (!started.ok) throw new Error('Could not start the upload.');
-  const { id } = await started.json();
-  let offset = 0;
-  while (offset < file.size) {
-    let response = null;
-    for (let attempt = 0; ; attempt++) {
-      try { response = await fetch(`/api/uploads/${id}?offset=${offset}`, { method: 'PUT', body: file.slice(offset, offset + CHUNK_BYTES) }); break; }
-      catch (error) { if (attempt >= 3) throw new Error(`Lost the connection to ${SERVER} during upload.`); await sleep(1500 * (attempt + 1)); }
-    }
-    if (signedOut(response)) return null;
-    const data = await response.json().catch(() => ({}));
-    if (response.status === 409 && Number.isInteger(data.received)) { offset = data.received; continue; }
-    if (!response.ok) throw new Error(data.error || 'Upload failed. Please try again.');
-    offset = data.received;
-    progress(Math.round(offset / file.size * 100));
-  }
-  return id;
-}
-$('upload-form').addEventListener('submit', async e => {
-  e.preventDefault(); clearTimeout(pollTimer); jobId = null; current = null; renderedFor = null; closeEditor(); sessionStorage.removeItem('asr-job');
-  const file = $('audio-input').files[0];
-  if (!file) return;
-  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return fail(`This file is larger than the ${MAX_UPLOAD_MB} MB upload limit.`);
-  const form = new FormData(); form.append('model', $('model').value); form.append('mode', $('mode').value); form.append('name', file.name);
-  setBusy(true); show('processing'); $('status-label').textContent = 'Uploading recording…';
-  $('status-detail').textContent = HOSTED ? 'Sending your recording to the server.' : 'Saving your recording to the local workspace.';
-  $('progress-description').textContent = 'Uploading'; progress(0); $('result-meta').textContent = '';
-  try {
-    const uploadId = await uploadInPieces(file);
-    if (!uploadId) return;
-    form.append('upload_id', uploadId);
-    $('status-detail').textContent = 'Checking the audio…'; progress(null);
-    const response = await fetch('/api/jobs', { method: 'POST', body: form });
-    if (signedOut(response)) return;
-    const data = await response.json().catch(() => ({}));
-    if (response.status !== 202) return fail(data.error || 'Upload failed. Please try again.');
-    jobId = data.id; sessionStorage.setItem('asr-job', jobId); pollFailures = 0; poll();
-  } catch (error) {
-    fail(error.message || `Could not connect to ${SERVER}.`);
-  }
+// Coming back to the tab: refresh at once rather than waiting for the next timer.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  loadRuns();
+  if (jobId && jobId !== 'upload') { pollFailures = 0; poll(); }
 });
-async function poll() {
-  clearTimeout(pollTimer);
-  const currentId = jobId;
-  try {
-    const response = await fetch(`/api/jobs/${currentId}`);
-    if (signedOut(response)) return;
-    if (!response.ok) throw new Error(response.status === 404 ? 'This run is no longer active. Open a saved transcript under Previous runs.' : 'Could not read progress.');
-    const job = await response.json(); if (jobId !== currentId) return;
-    pollFailures = 0; $('result-meta').textContent = job.name;
-    if (job.status === 'complete') {
-      const first = renderedFor !== currentId;
-      current = job; show('result'); setBusy(false);
-      if (first || job.rev !== renderedRev) {
-        renderedRev = job.rev;
-        renderWords($('transcript'), false); renderWords($('gujlish'), true); markSelection();
-      }
-      $('translation').textContent = job.translation_text || '';
-      if (job.summary_markdown) renderMarkdown($('summary'), job.summary_markdown); else $('summary').replaceChildren();
-      markTabs();
-      if (first) { renderedFor = currentId; setTab('transcript'); loadHistory(); loadCaps(); loadDictionary(); }
-      else { updateExports(); updateStageBox(); }
-      if (STAGE_KEYS.some(key => running(job[key]))) pollTimer = setTimeout(poll, 1000);
-      return;
-    }
-    if (job.status === 'error') return fail(job.message, true);
-    show('processing'); setBusy(true);
-    $('status-label').textContent = job.status === 'queued' && job.ahead ? `Waiting · ${job.ahead} recording${job.ahead === 1 ? '' : 's'} ahead of yours` : {queued:'Waiting for the current run…',loading:'Preparing transcription…',transcribing:'Transcribing your recording…'}[job.status] || job.message;
-    $('status-detail').textContent = job.message + (job.device ? ` · ${job.device.toUpperCase()}` : '');
-    $('progress-description').textContent = job.status === 'transcribing' ? `${time(job.processed)}${job.duration ? ' / '+time(job.duration) : ''} audio processed` : 'Progress begins when the model is ready';
-    progress(job.status === 'transcribing' ? job.progress : null);
-    pollTimer = setTimeout(poll, 1000);
-  } catch(error) {
-    if (jobId !== currentId) return;
-    if (++pollFailures <= 4) { $('status-detail').textContent = `Reconnecting to ${SERVER}…`; pollTimer = setTimeout(poll, 1500); }
-    else fail(error.message);
-  }
-}
-$('retry-button').addEventListener('click', async () => {
-  try { const response = await fetch(`/api/jobs/${jobId}/retry`, {method:'POST'}); if (!response.ok) throw new Error('Could not resume this run.'); pollFailures=0; poll(); } catch(error) { fail(error.message, true); }
-});
-async function startStage(path, body) {
-  if (!current) return;
-  stageNotice = ''; $('stage-button').disabled = true; $('stage-alt').disabled = true;
-  try {
-    const response = await postJson(`/api/jobs/${jobId}/${path}`, body);
-    if (signedOut(response)) return;
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) { stageNotice = data.error || 'Could not start this step.'; updateStageBox(); return; }
-    pollFailures = 0; poll();
-  } catch { stageNotice = `Could not reach ${SERVER}.`; updateStageBox(); }
-}
-$('stage-button').addEventListener('click', () => startStage(stageBoxKey() === 'gujlish' ? 'gujlish' : 'english'));
-$('stage-alt').addEventListener('click', () => startStage('gujlish', { engine: 'gemini' }));
-$('copy-button').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText(tabText(tab)); $('copy-button').textContent = 'Copied ✓'; setTimeout(() => $('copy-button').textContent='Copy text', 2000); }
-  catch { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents($(tab)); selection.removeAllRanges(); selection.addRange(range); $('copy-button').textContent='Select & copy'; }
-});
-async function loadHistory() {
-  try {
-    const response = await fetch('/api/history'); if (signedOut(response)) return; const runs = await response.json();
-    $('history').replaceChildren();
-    if (!runs.length) { const p=document.createElement('p'); p.className='muted'; p.textContent='No saved transcripts yet.'; $('history').append(p); }
-    for (const run of runs) {
-      const button = document.createElement('button'); button.type='button'; button.className='history-item';
-      const name = document.createElement('span'); name.textContent=run.name;
-      // run folders are named YYYYMMDD-HHMMSS-ffffff (asr/storage.new_run)
-      const detail = document.createElement('small'); detail.textContent=`${run.model}${run.mode ? ' · '+run.mode : ''} · ${run.run.slice(0,8)} ${run.run.slice(9,15)}`;
-      button.append(name,detail); button.onclick=()=>{ if ($('start-button').disabled) return; closeEditor(); jobId=run.id; sessionStorage.setItem('asr-job',jobId); pollFailures=0; poll(); }; $('history').append(button);
-    }
-  } catch { $('history').textContent='Saved runs are temporarily unavailable.'; }
-}
 loadDictionary();
-loadHistory().then(() => { const saved=sessionStorage.getItem('asr-job'); if (saved) {jobId=saved;show('processing');poll();} });
+loadRuns().then(() => { const saved = sessionStorage.getItem('asr-job'); select(saved && runs.some(run => run.id === saved) ? saved : null); });
