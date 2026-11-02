@@ -312,6 +312,12 @@ window.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Fi
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('drop-overlay').hidden = true; } });
 window.addEventListener('drop', e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); dragDepth = 0; $('drop-overlay').hidden = true; takeFile(e.dataTransfer.files[0]); });
 
+async function fingerprintOf(file) {  // SHA-256 of the file, as web/recordings.py computes it; null if unavailable
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+    return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  } catch { return null; }
+}
 async function uploadInPieces(file, signal) {
   // Sent in pieces because hosting platforms cap the size of one request; offsets make a resent piece harmless.
   const started = await fetch('/api/uploads', { method: 'POST', signal });
@@ -341,11 +347,22 @@ $('upload-form').addEventListener('submit', async e => {
   if (!file) return;
   if (upload && !upload.error) return ask('One upload at a time', `“${upload.name}” is still uploading. Add this one when it has finished.`, [{ label: 'OK', value: true, kind: 'primary' }]);
   if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return ask('This file is too large', `Files up to ${MAX_UPLOAD_MB} MB can be added here.`, [{ label: 'OK', value: true, kind: 'primary' }]);
-  // The same size to the byte is, in practice, the same file: offer the transcript you already have.
-  const same = runs.find(run => run.size === file.size);
+  // The server knows recordings by a fingerprint of their audio, so a renamed copy is recognised too, and audio it
+  // already has is never uploaded again.
+  $('start-button').disabled = true; $('file-detail').textContent = 'Checking whether you already have it…';
+  const print = await fingerprintOf(file);
+  let known = { stored: false, runs: [] };
+  try {
+    const response = print ? await fetch(`/api/recordings/${print}`) : null;
+    if (response && signedOut(response)) return;
+    if (response && response.ok) known = await response.json();
+  } catch { /* checking is optional: upload as usual */ }
+  finally { $('start-button').disabled = false; chosen(); }
+  const same = known.runs[0];
   if (same) {
+    const others = known.runs.length > 1 ? ` (and ${known.runs.length - 1} more)` : '';
     const choice = await ask('You already have this recording',
-      `“${same.name}”${same.started ? `, added ${when(same.started)},` : ''} is exactly the same size, so it is almost certainly the same file.`,
+      `“${same.name}”${same.started ? `, added ${when(same.started)},` : ''}${others} has exactly the same audio.`,
       [{ label: 'Open it', value: 'open', kind: 'primary' }, { label: 'Transcribe again', value: 'again' }, { label: 'Cancel', value: null }]);
     if (choice === 'open') { clearFile(); select(same.id); return; }
     if (choice !== 'again') return;
@@ -355,13 +372,23 @@ $('upload-form').addEventListener('submit', async e => {
   upload = { name: file.name, size: file.size, percent: 0, error: '', controller: new AbortController() };
   const mine = upload;
   select('upload'); loadRuns();
+  const start = () => fetch('/api/jobs', { method: 'POST', body: form, signal: mine.controller.signal });
   try {
-    const uploadId = await uploadInPieces(file, mine.controller.signal);
-    if (!uploadId) return;
-    form.append('upload_id', uploadId);
-    mine.checking = true; if (jobId === 'upload') renderUpload();
-    const response = await fetch('/api/jobs', { method: 'POST', body: form, signal: mine.controller.signal });
-    if (signedOut(response)) return;
+    let response = null;
+    if (known.stored) {  // the server has this audio already: start straight away
+      form.append('fingerprint', print); mine.checking = true; if (jobId === 'upload') renderUpload();
+      response = await start();
+      if (signedOut(response)) return;
+      if (response.status === 409) { form.delete('fingerprint'); mine.checking = false; response = null; }  // gone since
+    }
+    if (!response) {
+      const uploadId = await uploadInPieces(file, mine.controller.signal);
+      if (!uploadId) return;
+      form.append('upload_id', uploadId);
+      mine.checking = true; if (jobId === 'upload') renderUpload();
+      response = await start();
+      if (signedOut(response)) return;
+    }
     const data = await response.json().catch(() => ({}));
     if (response.status !== 202) throw new Error(data.error || 'Upload failed. Please try again.');
     const watching = jobId === 'upload';

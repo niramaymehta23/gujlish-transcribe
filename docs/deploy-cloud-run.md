@@ -54,7 +54,7 @@ Main Cloud Run settings, all in `deploy/deploy.sh`:
 
 - **One L4 GPU, 4 CPUs, 16 GB memory**, at most **one instance**, so the bill can't multiply and there is a single transcription queue.
 - **Minimum zero instances**, so you pay nothing while idle. Setting a minimum of 1 removes cold starts but bills around the clock.
-- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
+- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`, with one copy of each recording: `recordings/.fingerprints.json` keeps each file's SHA-256, and each time an instance starts it merges identical copies and removes leftovers from uploads that never became a run. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
 ## Costs
 

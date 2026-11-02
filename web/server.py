@@ -38,6 +38,8 @@ from asr.storage import ROOT, new_run, run_paths, stage_paths
 from asr.subtitles import to_srt
 from asr.textutil import fmt_time, write_json
 from web.documents import markdown_docx, transcript_docx
+from web.recordings import FINGERPRINT, fingerprint, fingerprints
+from web.recordings import find as find_recording
 from web.settings import Settings
 
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
@@ -49,6 +51,7 @@ OWNER_FILE = ".owner"
 RUN_FILE = ".run.json"  # the recording, its settings, and the steps still to finish
 MAX_RESUMES = 3  # restarts in a row after which cut-short work waits for you instead of resuming itself
 STOP_GRACE_SECONDS = 10  # a stopped worker is killed if it is still running after this
+LEFTOVER_SECONDS = 3600  # unused recordings and empty run folders younger than this may belong to an upload under way
 EVENT_PREFIX = "ASR_EVENT "
 STOPPED = "Stopped. Start it again to continue where it left off."
 
@@ -289,9 +292,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return None
         except (OSError, ValueError, KeyError, TypeError, IndexError):
             return None
-        source = storage.RECORDINGS / record["name"]
-        record["source"] = str(source)
-        record["size"] = meta.get("size") or (source.stat().st_size if source.is_file() else None)
+        # "name" is what you called the file; "recording" points at the stored copy when duplicates were merged.
+        recording = storage.RECORDINGS / (meta.get("recording") or record["name"])
+        record.update(name=meta.get("name") or record["name"], source=str(recording), sha256=meta.get("sha256"))
+        record["size"] = meta.get("size") or (recording.stat().st_size if recording.is_file() else None)
         return record
 
     def restore(job_id: str) -> dict | None:
@@ -529,13 +533,55 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 finish_pending(job["run_dir"], set(later))
             return
 
+    def merge_recordings():
+        """Keep one stored copy of each recording. Runs that used a duplicate point at the kept copy instead. Run
+        folders left by uploads whose transcription never started, and recordings no run uses, are removed once they
+        are LEFTOVER_SECONDS old. Copies an unfinished run still reads from are left alone."""
+        cutoff = time.time() - LEFTOVER_SECONDS
+        for run_dir in run_dirs():
+            began = started(run_dir)
+            empty = not read_meta(run_dir) and not any(run_dir.glob(".*.partial.json"))
+            if (
+                empty
+                and began
+                and datetime.fromisoformat(began).timestamp() < cutoff
+                and not find_transcript(run_dir, {})
+            ):
+                shutil.rmtree(run_dir, ignore_errors=True)
+        users = {}
+        for job in all_runs():
+            users.setdefault(job.get("source"), []).append(job)
+        copies = {}
+        for name, value in fingerprints().items():
+            copies.setdefault(value, []).append(storage.RECORDINGS / name)
+        for paths in copies.values():
+            if len(paths) < 2 or any(job["status"] != "complete" for p in paths for job in users.get(str(p), [])):
+                continue
+            keep = max(paths, key=lambda path: (len(users.get(str(path), [])), -path.stat().st_mtime))
+            for path in paths:
+                if path == keep:
+                    continue
+                for job in users.pop(str(path), []):
+                    update_meta(job["run_dir"], lambda meta: meta.update(recording=keep.name))
+                    with lock:
+                        job["source"] = str(keep)
+                    users.setdefault(str(keep), []).append(job)
+                path.unlink(missing_ok=True)
+        for name in fingerprints():
+            path = storage.RECORDINGS / name
+            if str(path) not in users and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+
     def recover():
         """Once per server start, resume the work a restart cut short. After MAX_RESUMES restarts in a row it waits for
-        you instead, so a recording that brings the server down cannot keep doing so."""
+        you instead, so a recording that brings the server down cannot keep doing so. Hosted sites also merge
+        duplicate recordings."""
         with lock:
             if recovered[0]:
                 return
             recovered[0] = True
+        if settings.hosted:
+            merge_recordings()
         for run_dir in run_dirs():
             meta = read_meta(run_dir)
             unfinished = meta.get("source") and not meta.get("paused") and not meta.get("failed")
@@ -659,29 +705,15 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             handle.write(data)
         return jsonify(received=size + len(data))
 
-    @app.post("/api/jobs")
-    def create_job():
-        sweep()
-        model, mode = request.form.get("model", settings.models[0]), request.form.get("mode", "mixed")
-        if model not in settings.models or mode not in {"mixed", "native"}:
-            return jsonify(error="Choose a valid model and output mode."), 400
-        upload, upload_id = request.files.get("audio"), request.form.get("upload_id")
-        name = upload.filename if upload else request.form.get("name", "")
-        if not (upload or upload_id) or not name:
-            return jsonify(error="Choose an audio file first."), 400
-        filename = clean_filename(name)
-        if not filename:
-            return jsonify(error="Choose a file with a valid filename."), 400
-        owner = owner_tag()
-        if settings.hosted:
-            with lock:
-                if any(job.get("owner") == owner and job["status"] in ACTIVE for job in jobs.values()):
-                    message = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
-                    return jsonify(error=message), 429
-        partial = upload_path(upload_id) if upload_id and not upload else None
-        if partial is not None and not partial.exists():
-            return jsonify(error="The upload did not finish. Please try again."), 400
-        storage.RECORDINGS.mkdir(parents=True, exist_ok=True)
+    def store_upload(upload, partial, filename) -> tuple[Path, bool, str]:
+        """Save an uploaded recording, or reuse the stored copy of the same audio. Returns the file, whether it is
+        new, and its fingerprint."""
+        if partial is not None:
+            sha = fingerprint(partial)
+            same = find_recording(sha)
+            if same:
+                partial.unlink(missing_ok=True)
+                return same, False, sha
         source = storage.RECORDINGS / filename
         base = source
         suffix = 2
@@ -699,26 +731,75 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 suffix += 1
         if partial is not None:
             partial.unlink(missing_ok=True)
+            return source, True, sha
+        sha = fingerprint(source)
+        same = find_recording(sha, exclude=source.name)
+        if same:
+            source.unlink()
+            return same, False, sha
+        return source, True, sha
+
+    @app.get("/api/recordings/<sha>")
+    def recording_status(sha):
+        """Whether this audio is stored already (so it need not be uploaded), and your runs of it."""
+        stored = find_recording(sha) if FINGERPRINT.fullmatch(sha) else None
+        runs = []
+        for job in all_runs():
+            with lock:
+                if owns(job) and stored and (job.get("sha256") == sha or job.get("source") == str(stored)):
+                    runs.append({key: job.get(key) for key in ("id", "name", "started", "status")})
+        return jsonify(stored=stored is not None, runs=runs)
+
+    @app.post("/api/jobs")
+    def create_job():
+        sweep()
+        model, mode = request.form.get("model", settings.models[0]), request.form.get("mode", "mixed")
+        if model not in settings.models or mode not in {"mixed", "native"}:
+            return jsonify(error="Choose a valid model and output mode."), 400
+        upload, upload_id = request.files.get("audio"), request.form.get("upload_id")
+        known = request.form.get("fingerprint", "")  # a recording already stored: nothing was uploaded
+        name = upload.filename if upload else request.form.get("name", "")
+        if not (upload or upload_id or known) or not name:
+            return jsonify(error="Choose an audio file first."), 400
+        filename = clean_filename(name)
+        if not filename:
+            return jsonify(error="Choose a file with a valid filename."), 400
+        owner = owner_tag()
+        if settings.hosted:
+            with lock:
+                if any(job.get("owner") == owner and job["status"] in ACTIVE for job in jobs.values()):
+                    message = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
+                    return jsonify(error=message), 429
+        partial = upload_path(upload_id) if upload_id and not upload else None
+        if partial is not None and not partial.exists():
+            return jsonify(error="The upload did not finish. Please try again."), 400
+        storage.RECORDINGS.mkdir(parents=True, exist_ok=True)
+        if upload or partial is not None:
+            source, new, sha = store_upload(upload, partial, filename)
+        else:
+            source, new, sha = find_recording(known) if FINGERPRINT.fullmatch(known) else None, False, known
+            if source is None:
+                return jsonify(error="This recording is not stored here yet.", upload=True), 409
         try:
             duration = probe_audio(source)
             if settings.max_minutes and duration and duration > settings.max_minutes * 60:
                 raise ValueError(f"Recordings up to {round(settings.max_minutes)} minutes are accepted here.")
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
-            source.unlink(missing_ok=True)
+            if new:
+                source.unlink(missing_ok=True)
             return jsonify(error=str(error)), 400
         run_dir = new_run(source, model, mode)
         if settings.hosted:
             (run_dir / OWNER_FILE).write_text(owner, encoding="utf-8")
         size = source.stat().st_size
-        write_json(
-            run_dir / RUN_FILE,
-            {"source": source.name, "model": model, "mode": mode, "duration": duration, "size": size},
-        )
+        meta = {"source": source.name, "name": filename, "model": model, "mode": mode, "duration": duration}
+        write_json(run_dir / RUN_FILE, {**meta, "size": size, "sha256": sha})
         job_id = run_id(run_dir)
         with lock:
             jobs[job_id] = {
                 "id": job_id,
-                "name": source.name,
+                "name": filename,
+                "sha256": sha,
                 "model": model,
                 "mode": mode,
                 "status": "queued",
@@ -983,8 +1064,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                     "context": context,
                 }
                 rule = remember(dictionary, heard, correct, heard_gujlish, " ".join(latin), example)
-                recording = storage.RECORDINGS / str(data.get("source") or "")
-                if rule and data.get("source") and recording.is_file():
+                recording = Path(job.get("source") or "")
+                if rule and recording.is_file():
                     example["clip"] = f"{rule['id']}-{uuid4().hex[:6]}.ogg"
                     clip = (recording, segment["start"], segment["end"], clips_dir() / example["clip"])
                 save_dictionary(dictionary)

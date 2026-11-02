@@ -96,7 +96,7 @@ Open **[http://localhost:8765](http://localhost:8765)** in your browser. To stop
 
 Then:
 
-1. **Add a recording.** Drop it anywhere on the page or click **New recording**. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV). If it is a recording you have already transcribed, the app asks whether to open that one instead.
+1. **Add a recording.** Drop it anywhere on the page or click **New recording**. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV). If it is a recording you have already transcribed (even renamed), the app asks whether to open that one instead. The app recognises recordings by a fingerprint of the audio, keeps one copy of each, and never uploads audio it already has.
 2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can keep English words in English letters (the default) or write everything in Gujarati script. **Gujlish** is a smaller comparison model.
 3. **Click Transcribe.** The recording appears under **Recordings** with its progress, and you can open other recordings while it works. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
 4. **Fix any misheard words** in the **Gujarati** or **Gujlish** tab (see [below](#fix-words-and-build-your-dictionary)).
