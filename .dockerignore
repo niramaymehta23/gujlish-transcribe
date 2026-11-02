@@ -8,6 +8,8 @@
 recordings
 transcripts
 plots
+dictionary.json
+dictionary-clips
 tests
 docs
 *.md

@@ -23,6 +23,9 @@ dist/
 *.key
 .DS_Store
 recordings/*
+# The correction dictionary the web app builds from your fixes, and its audio clips.
+dictionary.json
+dictionary-clips/
 transcripts/*
 plots/*
 !recordings/.gitkeep

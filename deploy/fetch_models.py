@@ -1,4 +1,5 @@
-"""Download the models named in GUJLISH_MODELS into the image's Hugging Face cache (run during docker build)."""
+"""Download the models named in GUJLISH_MODELS, and the Gujlish transliteration model, into the image's Hugging Face
+cache (run during docker build)."""
 
 import os
 from pathlib import Path
@@ -10,6 +11,10 @@ REPOS = {
     "flex": ("bodhan-ai/indic-transcribe-flex", ["nemo/*"]),
     "gujlish": ("WhissleAI/speech-tagger_gujlish_wav2vec2_meta", []),
 }
+# Kept in step with asr/gujlish.py: IndicXlit in both directions (Gujarati → Gujlish, and Gujlish → Gujarati for the
+# word editor's suggestions).
+XLIT = ("Singla0009/all-indic-transliteration", "23279e441f195f6a45296fcee84ac89b541254ff")
+XLIT_FOLDERS = ["indicxlit_indic_en_ct2_fp32/*", "indicxlit_ct2_fp32/*"]
 
 secret = Path("/run/secrets/hf_token")
 token = secret.read_text().strip() if secret.exists() else None
@@ -20,3 +25,5 @@ for model in filter(None, (m.strip() for m in os.environ["GUJLISH_MODELS"].split
         raise SystemExit("Flex is gated: build with --secret id=hf_token,src=<file holding your Hugging Face token>")
     print(f"Fetching {repo}", flush=True)
     snapshot_download(repo, revision=revision, ignore_patterns=ignore or None, token=token)
+print(f"Fetching {XLIT[0]}", flush=True)
+snapshot_download(XLIT[0], revision=XLIT[1], allow_patterns=XLIT_FOLDERS)

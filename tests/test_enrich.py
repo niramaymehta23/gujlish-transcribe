@@ -194,6 +194,39 @@ class TestRunTranslation(Base):
             run_translation(self.transcript, FakeLLM(), tone="faithful")
         run_translation(self.transcript, FakeLLM(), tone="faithful", reset=True)
 
+    def edit_transcript(self, index, text):
+        data = json.loads(self.transcript.read_text(encoding="utf-8"))
+        data["segments"][index]["text"] = text
+        self.transcript.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    def test_after_a_word_fix_only_the_changed_segment_is_translated_again(self):
+        run_translation(self.transcript, FakeLLM())
+        self.edit_transcript(2, "અરે, જુઓ, એ ખૂબ સારી વાત હતી")  # segment 1 is the skipped one
+        again = FakeLLM(lambda s, u, n: "Hey, look, that was a good thing")
+        paths = run_translation(self.transcript, again)
+        self.assertEqual(len(again.calls), 1)
+        self.assertIn("ખૂબ સારી", again.calls[0]["user"].split("<current_segment")[1])
+        english = [s["text"] for s in json.loads(paths["translation_json"].read_text())["segments"]]
+        self.assertEqual(
+            english, ["This is English line 1", "Hey, look, that was a good thing", "This is English line 3"]
+        )
+        fresh = FakeLLM()
+        run_translation(self.transcript, fresh, reset=True)  # --reset still translates everything
+        self.assertEqual(len(fresh.calls), 3)
+
+    def test_an_interrupted_translation_restarts_after_a_word_fix(self):
+        llm = FakeLLM()
+        llm.fail_at = 2
+        with self.assertRaises(RuntimeError):
+            run_translation(self.transcript, llm)
+        self.edit_transcript(0, "આજે હું તમને એક નવી વાર્તા કહેવા માગું છું")
+        resumed = FakeLLM()
+        run_translation(self.transcript, resumed)  # no "--reset" error: only the transcript changed
+        self.assertEqual(len(resumed.calls), 3)
+        later = FakeLLM()
+        run_translation(self.transcript, later, tone="faithful")  # other settings: nothing is reused
+        self.assertEqual(len(later.calls), 3)
+
     def test_untranslated_reply_is_retried_then_marked(self):
         llm = FakeLLM(lambda s, u, n: GU[0][0])  # model just echoes the Gujarati
         paths = run_translation(self.transcript, llm, limit=1)

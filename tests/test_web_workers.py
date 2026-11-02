@@ -59,10 +59,12 @@ class TestWorkers(unittest.TestCase):
         self.job = self.app.extensions["asr_jobs"][self.job_id]
 
     def run_task(self, worker):
+        """Run the queued task; return the first command it started (all of them are kept in self.commands)."""
         function, args = self.executor.tasks.pop()
         with patch("web.server.subprocess.Popen", return_value=worker) as popen:
             function(*args)
-        return popen.call_args.args[0]
+        self.commands = [call.args[0] for call in popen.call_args_list]
+        return self.commands[0]
 
     def retry_transcription(self, worker):
         self.job.update(status="error", txt=None, json=None, duration=10.0, source="talk.wav")
@@ -84,6 +86,8 @@ class TestWorkers(unittest.TestCase):
         command = self.retry_transcription(FakeWorker(lines, on_wait=record_progress))
         self.assertTrue(command[1].endswith("transcribe.py"))
         self.assertIn("--progress-json", command)
+        self.assertIn("--dictionary", command)
+        self.assertTrue(self.commands[1][1].endswith("transliterate.py"))  # Gujlish follows on its own
         self.assertEqual(seen[0]["device"], "cpu")
         self.assertEqual(seen[0]["processed"], 4.0)
         self.assertEqual(seen[0]["progress"], 40)
