@@ -29,8 +29,10 @@ The requirement was spoken, direct English that follows the speaker's tone, not 
 
 Behavior that matters:
 
-- One segment per call, in order, with the previous three segments and their English, a preview of the next, and the glossary. A failure loses one chunk and a run resumes from a JSONL file.
-- Replies are cleaned (reasoning tags, fences, labels, wrapping quotes) and validated (empty, still mostly Gujarati, far shorter than the source). One retry, then the source is kept with an `[untranslated]` marker. Nothing is silently dropped.
+- Chunks are cut at pauses, often mid-sentence, so up to six are translated per call as one passage, with the previous three and their English, the next two, and the glossary. The model writes the passage as flowing English, then gives each chunk its share as JSON, so the English subtitles keep their timing. A failure loses one passage and a run resumes from a JSONL file. After a word fix only the changed chunks are sent, with the English on both sides to fit between.
+- The recognizer ends every chunk with a full stop. Those stops are dropped after recognition ("?" and "!" stay), so they no longer show up in the Gujarati, the Gujlish or the subtitles, and the English decides sentence ends from meaning.
+- Replies are cleaned (reasoning tags, fences, labels, wrapping quotes) and validated per chunk (missing, empty, still mostly Gujarati, far shorter than the source). One retry of the passage, then each chunk still unusable is sent alone, then its source is kept with an `[untranslated]` marker. Nothing is silently dropped.
+- Subtitle cues end at sentence ends, then commas and dashes, then (for Gujarati and Gujlish, which have little punctuation) common clause-final verbs such as છે and નથી, before falling back to the line length.
 - Transcript text is escaped so it cannot close the prompt's tags.
 
 ## Summary
@@ -39,7 +41,7 @@ The English is summarized in sections of about 16,000 characters, then merged in
 
 ## Translation prompt in brief
 
-**How the tone is kept.** Dedicated translation models take one instruction and offer no tone control, so tone comes from an instruction-following LLM. Each segment is translated with a brief describing the spoken register, the previous three segments with the English already produced (consistent names and phrasing), a short preview of the next segment, and your glossary. The model is told to translate meaning rather than words, carry over emotion and emphasis, use `[unclear]` instead of guessing, and treat transcript text as content, never instructions. `--tone faithful` gives a closer, plainer rendering; `--style-note "a village elder addressing a gathering"` adds context; `--glossary glossary.example.json` fixes names and terms.
+**How the tone is kept.** Dedicated translation models take one instruction and offer no tone control, so tone comes from an instruction-following LLM. Each passage is translated with a brief describing the spoken register, the previous three segments with the English already produced (consistent names and phrasing), the next two segments, and your glossary. The model is told to read the passage as a whole, decide sentence boundaries from meaning rather than from cuts, say it the way the speaker would in English rather than word for word, keep call-and-response and emphasis, drop meaningless fillers, use `[unclear]` instead of guessing, and treat transcript text as content, never instructions. `--tone faithful` gives a closer, plainer rendering; `--style-note "a village elder addressing a gathering"` adds context; `--glossary glossary.example.json` fixes names and terms.
 
 ## Earlier decisions and trade-offs
 
