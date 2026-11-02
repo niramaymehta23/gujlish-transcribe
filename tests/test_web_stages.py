@@ -83,7 +83,7 @@ class TestStages(unittest.TestCase):
             response = self.post("translate", {"llm": "local", "model": "--evil flag"})  # ignored: Gemini only
             self.assertEqual(response.status_code, 202)
             self.assertEqual(self.post("translate").status_code, 409)
-        function, (job_id, steps) = self.executor.tasks[0]
+        function, (job_id, steps, _) = self.executor.tasks[0]
         key, command = steps[0]
         self.assertEqual(key, "translation")
         self.assertTrue(command[1].endswith("translate.py"))

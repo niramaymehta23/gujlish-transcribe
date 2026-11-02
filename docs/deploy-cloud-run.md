@@ -52,9 +52,9 @@ The script builds the image on Google Cloud Build (the first build downloads PyT
 
 Main Cloud Run settings, all in `deploy/deploy.sh`:
 
-- **One L4 GPU, 4 CPUs, 16 GB memory**, at most **one instance**, so the bill can't multiply and the in-memory job list stays correct.
+- **One L4 GPU, 4 CPUs, 16 GB memory**, at most **one instance**, so the bill can't multiply and there is a single transcription queue.
 - **Minimum zero instances**, so you pay nothing while idle. Setting a minimum of 1 removes cold starts but bills around the clock.
-- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
+- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`, with one copy of each recording: `recordings/.fingerprints.json` keeps each file's SHA-256, and each time an instance starts it merges identical copies and removes leftovers from uploads that never became a run. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
 ## Costs
 
@@ -66,6 +66,6 @@ You pay for the GPU instance while it runs: while it works, and for a short idle
 
 ## Known limitations
 
-- **Closing the tab mid-job.** The browser's progress polling keeps the instance busy. If the only visitor closes the tab during a long transcription, Cloud Run may shut the instance down when it decides it is idle, which stops that job. It can be resumed with Retry. A proper fix moves transcription to a background job service.
-- **One job at a time.** Visitors queue behind each other and see how many recordings are ahead of theirs.
+- **The instance can stop mid-job.** Cloud Run sometimes replaces the instance, and may shut it down when nobody has the page open. Each run keeps its state in its folder in the bucket (`.run.json`), so the next instance lists it, opens it by the same link and resumes unfinished transcription or translation from the last saved point. After three restarts in a row it waits for you to press **Resume** instead. Work only continues while an instance is running, so a job that stopped while the site was closed resumes on the next visit.
+- **One transcription at a time.** Recordings queue for the GPU and show how many are ahead. Gujlish, translation and summaries run on a separate queue, so they don't wait for transcriptions.
 - **Cold starts.** The first request after an idle period waits for the instance and model to load.

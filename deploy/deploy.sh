@@ -18,7 +18,7 @@ fi
 gcloud builds submit --project "$PROJECT_ID" --region "$REGION" --config deploy/cloudbuild.yaml \
   --substitutions "_IMAGE=$tag,_MODELS=$MODELS" .
 
-# --max-instances 1: one GPU at most, so the bill can't multiply and in-memory job tracking stays correct.
+# --max-instances 1: one GPU at most, so the bill can't multiply and there is a single transcription queue.
 # --no-cpu-throttling: transcription runs in the background between browser requests (GPUs require it anyway).
 gcloud run deploy "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --image "$tag" \
   --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy --cpu 4 --memory 16Gi --no-cpu-throttling \

@@ -100,13 +100,13 @@ class TestPassword(HostedBase):
 
 class TestUploadsAndPrivacy(HostedBase):
     def test_chunked_upload_rebuilds_the_file(self):
-        client = self.app().test_client()
-        response = self.start_job(client)
+        app = self.app()
+        response = self.start_job(app.test_client())
         self.assertEqual(response.status_code, 202, response.json)
-        job = self.executor.tasks[0][1]
+        job = app.extensions["asr_jobs"][response.json["id"]]
         saved = self.root / "recordings" / "talk.wav"
         self.assertEqual(saved.read_bytes(), self.source.read_bytes())
-        self.assertEqual(Path(job[2], ".owner").exists(), True)
+        self.assertEqual(Path(job["run_dir"], ".owner").exists(), True)
         self.assertEqual(list((self.root / "tmp" / "gujlish-uploads").glob("*")), [])
 
     def test_out_of_order_and_oversized_pieces(self):
