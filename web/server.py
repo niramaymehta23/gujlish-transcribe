@@ -242,7 +242,17 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         return not settings.hosted or job.get("owner") == owner_tag()
 
     def run_dirs() -> list[Path]:
-        return [path for path in storage.TRANSCRIPTS.glob("*/*/*/") if path.is_dir() and str(path) not in deleted]
+        """transcripts/<recording>/<model>/<run>/ folders. Listed level by level, so one deleted in the meantime is
+        skipped (Python 3.10's glob fails on it instead)."""
+
+        def folders(parent):
+            try:
+                return [path for path in parent.iterdir() if path.is_dir()]
+            except OSError:
+                return []
+
+        runs = [run for name in folders(storage.TRANSCRIPTS) for label in folders(name) for run in folders(label)]
+        return [run for run in runs if str(run) not in deleted]
 
     def load_run(run_dir: Path) -> dict | None:
         """A job record rebuilt from a run folder: finished, paused, or cut short by a restart."""
