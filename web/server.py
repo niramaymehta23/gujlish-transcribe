@@ -34,6 +34,7 @@ from asr.dictionary import save as save_dictionary
 from asr.edits import load_gujlish, matches, replace_words, save_transcript
 from asr.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
 from asr.llm import gemini_available
+from asr.postprocess import drop_cut_stop
 from asr.storage import ROOT, new_run, run_paths, stage_paths
 from asr.subtitles import to_srt
 from asr.textutil import fmt_time, write_json
@@ -857,7 +858,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             view["translation_text"] = paths["translation_txt"].read_text(encoding="utf-8")
             if paths["translation_json"].exists():
                 english = json.loads(paths["translation_json"].read_text(encoding="utf-8")).get("segments", [])
-                current = [s["text"].strip() for s in segments if s.get("text", "").strip()]
+                # The translator reads each chunk without its cut full stop (asr.postprocess.drop_cut_stop).
+                current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
                 view["english_stale"] = [s.get("source") for s in english] != current
         if state["summary"]["status"] == "complete":
             view["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
