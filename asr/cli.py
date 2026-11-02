@@ -22,7 +22,7 @@ from .edits import transcript_text
 from .enrich import STAGE_ERRORS, add_llm_arguments, run_stages
 from .guards import check_segment
 from .gujlish import Transliterator, run_gujlish
-from .postprocess import confidence_plot, correct_segments, load_vocabulary, merge_segments
+from .postprocess import confidence_plot, correct_segments, drop_cut_stops, load_vocabulary, merge_segments
 from .segmenter import split_chunk
 from .storage import TRANSCRIPTS, new_run, run_label, run_paths
 from .subtitles import write_srt
@@ -53,6 +53,7 @@ def _metadata(source: Path, args, device: str, detector_name: str | None) -> dic
 
 def _merge_pieces(pieces: list[dict], start: float, end: float) -> dict:
     """Combine the results of decoding the two halves of a split chunk."""
+    drop_cut_stops(pieces)
     merged = {"start": start, "end": end, "text": " ".join(p["text"] for p in pieces if p["text"]).strip()}
     if any("words" in piece for piece in pieces):
         merged["words"] = [word for piece in pieces for word in piece.get("words", [])]
@@ -171,6 +172,7 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
             "No speech was detected in this recording. If it is very quiet, retry with --chunking fixed, which "
             "does not rely on speech detection."
         )
+    drop_cut_stops(segments)
     if vocabulary:
         correct_segments(segments, vocabulary)
     transcript = merge_segments(segments)

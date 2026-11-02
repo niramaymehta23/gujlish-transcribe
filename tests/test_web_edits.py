@@ -101,6 +101,19 @@ class TestEdits(unittest.TestCase):
         self.edit()
         self.assertTrue(self.status()["english_stale"])
 
+    def test_english_of_an_older_transcript_is_current_without_its_cut_stops(self):
+        # Transcripts made before cut full stops were dropped still have them; the translator reads them without.
+        data = json.loads(self.json.read_text(encoding="utf-8"))
+        data["segments"][1]["text"] = "હા નીરમય."
+        self.json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        english = {"kind": "translation", "segments": [
+            {"start": 0, "end": 4, "source": "નીરમય આવ્યો, નીરમય!", "text": "Nirmay came, Nirmay!"},
+            {"start": 4, "end": 6, "source": "હા નીરમય", "text": "Yes Nirmay"},
+        ]}  # fmt: skip
+        (self.run_dir / "talk.flex.en.json").write_text(json.dumps(english, ensure_ascii=False), encoding="utf-8")
+        (self.run_dir / "talk.flex.en.txt").write_text("Nirmay came", encoding="utf-8")
+        self.assertFalse(self.status()["english_stale"])
+
     def test_dictionary_listing_and_forgetting(self):
         self.edit(correct_gujlish="niramay")
         entries = self.client.get("/api/dictionary").json

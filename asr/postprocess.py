@@ -47,6 +47,27 @@ def merge_segments(segments: list[dict]) -> str:
     return merged
 
 
+CUT_STOPS = ".।"
+
+
+def drop_cut_stop(text: str) -> str:
+    """Flex ends every chunk with a full stop, as if each were a whole sentence. Chunks are cut at any pause, so most
+    of those stops land mid-sentence; drop them and leave sentence ends to the translation. "?" and "!" are kept,
+    and so are "..." and abbreviations such as "U.S."."""
+    text = text.rstrip()
+    last = text.rsplit(" ", 1)[-1]
+    if len(last) > 1 and last[-1] in CUT_STOPS and not any(char in CUT_STOPS for char in last[:-1]):
+        return text[:-1]
+    return text
+
+
+def drop_cut_stops(segments: list[dict]) -> None:
+    for segment in segments:
+        segment["text"] = drop_cut_stop(segment.get("text", ""))
+        if segment.get("words"):
+            segment["words"][-1]["word"] = drop_cut_stop(segment["words"][-1]["word"])
+
+
 def load_vocabulary(path: Path) -> dict[str, str]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):

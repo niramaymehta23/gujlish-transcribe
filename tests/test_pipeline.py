@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 from asr.cli import _decode_chunk, build_parser, run
-from asr.postprocess import merge_segments
+from asr.postprocess import drop_cut_stop, drop_cut_stops, merge_segments
 from asr.segmenter import AudioChunk
 from asr.storage import new_run, run_paths
 from evaluate import error_rate
@@ -27,6 +27,22 @@ class TestMergeAndRedecode(unittest.TestCase):
         self.assertEqual(merge_segments(segments), f"{refrain} જય શ્રી કૃષ્ણ આગળ")
         segments = [{"text": "આજે machine learning", "overlap": 0.0}, {"text": "learning વિશે", "overlap": 0.4}]
         self.assertEqual(merge_segments(segments), "આજે machine learning વિશે")
+
+    def test_full_stops_at_chunk_cuts_are_dropped(self):
+        self.assertEqual(drop_cut_stop("આપણે બધા."), "આપણે બધા")
+        self.assertEqual(drop_cut_stop("કેટલા દિવસ ચાલે?"), "કેટલા દિવસ ચાલે?")
+        self.assertEqual(drop_cut_stop("જય જય।"), "જય જય")
+        for kept in ("ખબર નથી...", "from the U.S.", ".", ""):
+            self.assertEqual(drop_cut_stop(kept), kept)
+        segments = [
+            {"text": "This is the stepping stone. શું છે? stepping stone."},
+            {"text": "jay.", "words": [{"word": "jay.", "start": 0.0, "end": 0.5}]},
+            {"text": "", "skipped": "no_speech"},
+        ]
+        drop_cut_stops(segments)
+        self.assertEqual(segments[0]["text"], "This is the stepping stone. શું છે? stepping stone")  # inner ones stay
+        self.assertEqual((segments[1]["text"], segments[1]["words"][0]["word"]), ("jay", "jay"))
+        self.assertEqual(segments[2]["text"], "")
 
     def test_fixed_mode_loops_are_redecoded_in_halves(self):
         class Backend:
@@ -122,9 +138,10 @@ class TestWorkflow(unittest.TestCase):
 
         with patch("asr.cli.choose_device", return_value="cpu"), patch("asr.cli.load_backend", return_value=Backend()):
             txt, data, _ = run(build_parser().parse_args(argv + ["--dictionary", str(dictionary)]))
-        self.assertEqual(txt.read_text(encoding="utf-8").strip(), "હું નિરામય. આવ્યો નિરામય")
+        # The full stop the recognizer put at the cut is gone before the dictionary runs.
+        self.assertEqual(txt.read_text(encoding="utf-8").strip(), "હું નિરામય આવ્યો નિરામય")
         segments = json.loads(data.read_text(encoding="utf-8"))["segments"]
-        self.assertEqual(segments[0]["fixes"], [{"start": 1, "end": 2, "heard": "નીરમય.", "rule": "a"}])
+        self.assertEqual(segments[0]["fixes"], [{"start": 1, "end": 2, "heard": "નીરમય", "rule": "a"}])
         self.assertIn("નિરામય", txt.with_suffix(".srt").read_text(encoding="utf-8"))
 
     def test_reset_discards_the_old_matching_checkpoint(self):

@@ -39,6 +39,32 @@ class TestSubtitles(unittest.TestCase):
             if following:
                 self.assertLessEqual(end, following[0] + 1e-9)
 
+    def test_cues_end_at_sentences_and_phrases(self):
+        text = (
+            "Our real wealth is our children. We travel everywhere, across America and Canada, "
+            "Australia and New Zealand, all of it in one year. In one year!"
+        )
+        cues = [body.replace("\n", " ") for _, _, body in segment_cues({"start": 0.0, "end": 20.0, "text": text})]
+        self.assertEqual(
+            cues,
+            [
+                "Our real wealth is our children.",
+                "We travel everywhere, across America and Canada, Australia and New Zealand,",
+                "all of it in one year. In one year!",
+            ],
+        )
+
+    def test_gujarati_without_punctuation_breaks_after_a_clause(self):
+        text = "આપણી સાચી મૂડી આપણાં બાળકો છે એના જીવનમાં સંસ્કારોનું જતન થાય અમે બધે જ ફરીએ છીએ America ફરીએ"
+        cues = [body.replace("\n", " ") for _, _, body in segment_cues({"start": 0.0, "end": 9.0, "text": text})]
+        self.assertTrue(cues[0].endswith("થાય"))
+        self.assertEqual(" ".join(cues), text)
+
+    def test_no_word_is_left_alone_at_the_end(self):
+        text = " ".join(["word"] * 17) + " end"  # 89 characters: one word too many for one cue
+        cues = segment_cues({"start": 0.0, "end": 9.0, "text": text})
+        self.assertGreater(len(cues[-1][2]), len("end"))
+
     def test_word_timings_are_used_when_they_match(self):
         words = [{"word": f"w{i}", "start": 1.0 + i, "end": 1.5 + i} for i in range(40)]
         text = " ".join(w["word"] for w in words)

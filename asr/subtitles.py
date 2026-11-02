@@ -6,6 +6,15 @@ from pathlib import Path
 
 MAX_LINE_CHARS = 42  # the usual subtitle line length
 MAX_CUE_CHARS = 2 * MAX_LINE_CHARS  # at most two lines on screen at once
+MIN_CUE_CHARS = 20  # a cue shorter than this is too brief to read; a short sentence shares the next one's cue
+SENTENCE_END = ".?!…।॥"
+PHRASE_END = ",;:—–"
+QUOTES = "\"'”’)]"
+# Verbs and auxiliaries that usually end a Gujarati clause, in Gujarati and in their Gujlish spellings.
+CLAUSE_END = {
+    "છે", "છું", "છો", "છીએ", "નથી", "હતો", "હતી", "હતું", "હતા", "હતાં", "હશે", "જોઈએ", "થાય", "થયું", "થયો", "થયા",
+    "che", "chu", "cho", "chiye", "nathi", "hato", "hati", "hatu", "hata", "hashe", "joie", "thay", "thayu", "thayo", "thaya",
+}  # fmt: skip
 
 
 def srt_time(seconds: float) -> str:
@@ -26,18 +35,51 @@ def _wrap(text: str) -> str:
     return text[:cut] + "\n" + text[cut + 1 :]
 
 
+def _strength(word: str) -> int:
+    """How good a place the end of this word is for a cue to end: 3 after a sentence, 2 after a phrase, 1 after a
+    Gujarati clause-final verb (the recognizer rarely punctuates inside a chunk), else 0."""
+    if word.rstrip(QUOTES)[-1:] in SENTENCE_END:
+        return 3
+    if word.rstrip(QUOTES)[-1:] in PHRASE_END:
+        return 2
+    return 1 if word.casefold() in CLAUSE_END else 0
+
+
 def _groups(words: list[str]) -> list[list[int]]:
-    """Indexes of consecutive words, grouped so each group's text fits in one cue."""
+    """Indexes of consecutive words, grouped so each group fits in one cue. A cue ends after a sentence once it is
+    long enough to read, and a cue that would overflow is cut at its best break: a sentence end, then a phrase end,
+    then a clause end, then wherever it is full."""
     groups: list[list[int]] = [[]]
-    length = 0
+
+    def length(group: list[int]) -> int:
+        return sum(len(words[i]) for i in group) + max(0, len(group) - 1)
+
+    def cut(group: list[int]) -> int:
+        """Where to end an overflowing cue. A sentence end may leave a short cue; a weaker break must fill half."""
+        best = (0, len(group))
+        for at, i in enumerate(group[:-1], 1):
+            strength = _strength(words[i])
+            if length(group[:at]) >= (MIN_CUE_CHARS if strength == 3 else MAX_CUE_CHARS // 2):
+                best = max(best, (strength, at))
+        return best[1] if best[0] else len(group)
+
     for index, word in enumerate(words):
-        added = len(word) + (1 if groups[-1] else 0)
-        if groups[-1] and length + added > MAX_CUE_CHARS:
+        group = groups[-1]
+        while group and length(group) + 1 + len(word) > MAX_CUE_CHARS:
+            at = cut(group)
+            groups[-1], group = group[:at], group[at:]
+            groups.append(group)
+        group.append(index)
+        if _strength(word) == 3 and length(group) >= MIN_CUE_CHARS:
             groups.append([])
-            length, added = 0, len(word)
-        groups[-1].append(index)
-        length += added
-    return [group for group in groups if group]
+    groups = [group for group in groups if group]
+    if len(groups) > 1 and length(groups[-1]) < MIN_CUE_CHARS:  # no word or two left dangling at the end
+        if length(groups[-2] + groups[-1]) <= MAX_CUE_CHARS:
+            groups[-2:] = [groups[-2] + groups[-1]]
+        else:
+            while length(groups[-1]) < MIN_CUE_CHARS and length(groups[-2][:-1]) >= MIN_CUE_CHARS:
+                groups[-1].insert(0, groups[-2].pop())
+    return groups
 
 
 def segment_cues(segment: dict) -> list[tuple[float, float, str]]:
