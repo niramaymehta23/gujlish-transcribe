@@ -1,4 +1,8 @@
-"""A local upload server that runs one worker subprocess at a time (transcribe, Gujlish, translate or summarize)."""
+"""The upload server. Transcription runs on a GPU queue, one recording at a time; Gujlish, English and summaries run
+on a separate queue, so a translation never waits for a transcription or the reverse.
+
+Each run keeps a small state file in its folder (RUN_FILE). A restarted server still lists every run, opens it by the
+same id, and picks up work a restart cut short. Hosted on Cloud Run, the machine can be replaced at any time."""
 
 import hashlib
 import hmac
@@ -6,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -29,18 +34,23 @@ from asr.dictionary import save as save_dictionary
 from asr.edits import load_gujlish, matches, replace_words, save_transcript
 from asr.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
 from asr.llm import gemini_available
-from asr.storage import ROOT, new_run, stage_paths
+from asr.storage import ROOT, new_run, run_paths, stage_paths
 from asr.subtitles import to_srt
+from asr.textutil import fmt_time, write_json
 from web.documents import markdown_docx, transcript_docx
 from web.settings import Settings
 
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
 UPLOAD_CHUNK_BYTES = 8 * 1024**2  # Cloud Run caps a request body at 32 MiB, so large files arrive in pieces
-UPLOAD_ID = re.compile(r"[0-9a-f]{32}")
+HEX_ID = re.compile(r"[0-9a-f]{32}")
 ACTIVE = {"queued", "loading", "transcribing"}
 SWEEP_EVERY_SECONDS = 600
 OWNER_FILE = ".owner"
+RUN_FILE = ".run.json"  # the recording, its settings, and the steps still to finish
+MAX_RESUMES = 3  # restarts in a row after which cut-short work waits for you instead of resuming itself
+STOP_GRACE_SECONDS = 10  # a stopped worker is killed if it is still running after this
 EVENT_PREFIX = "ASR_EVENT "
+STOPPED = "Stopped. Start it again to continue where it left off."
 
 
 @dataclass(frozen=True)
@@ -65,17 +75,46 @@ def stage_output(transcript_json: str, key: str) -> Path:
     return stage_paths(Path(transcript_json))[STAGES[key].output]
 
 
-def run_worker(command: list[str], on_event) -> tuple[int, list[str]]:
-    """Run a worker script, passing each progress event to `on_event`; return its exit code and last log lines."""
+def run_worker(command: list[str], on_event, on_start=None) -> tuple[int, list[str]]:
+    """Run a worker script, passing each progress event to `on_event`; return its exit code and last log lines.
+    `on_start` gets the process as soon as it exists, so it can be stopped."""
     logs: list[str] = []
     with subprocess.Popen(
-        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        command,
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,  # its own process group, so stopping it also stops the ffmpeg it starts
     ) as worker:
+        if on_start:
+            on_start(worker)
         for line in worker.stdout:
             logs = [*logs, line.strip()][-LOG_TAIL_LINES:]
             if line.startswith(EVENT_PREFIX):
                 on_event(json.loads(line[len(EVENT_PREFIX) :]))
         return worker.wait(), logs
+
+
+def stop_worker(worker) -> None:
+    """Stop a worker and everything it started; kill them if they are still running after a grace period."""
+
+    def send(sig):
+        try:
+            os.killpg(worker.pid, sig)
+        except OSError:
+            pass  # already finished
+
+    send(signal.SIGTERM)
+
+    def force():
+        try:
+            worker.wait(timeout=STOP_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            send(signal.SIGKILL)
+
+    Thread(target=force, daemon=True).start()
 
 
 def last_error(logs: list[str], fallback: str) -> str:
@@ -121,6 +160,47 @@ def clean_filename(name: str) -> str:
     ).strip(" .")[:180]
 
 
+def run_id(run_dir: Path) -> str:
+    """A run's id comes from its folder, so it is the same after a restart and a page opened before one still works."""
+    return hashlib.sha256("/".join(Path(run_dir).parts[-3:]).encode()).hexdigest()[:32]
+
+
+def read_meta(run_dir: Path) -> dict:
+    try:
+        return json.loads((Path(run_dir) / RUN_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def started(run_dir: Path) -> str | None:
+    """When the run began, with the server's time zone, so the browser can show it in yours."""
+    try:
+        return datetime.strptime(Path(run_dir).name, "%Y%m%d-%H%M%S-%f").astimezone().isoformat(timespec="seconds")
+    except ValueError:
+        return None
+
+
+def find_transcript(run_dir: Path, meta: dict) -> Path | None:
+    """The run's transcript JSON once transcription has finished, else None."""
+    if meta.get("source") and meta.get("model"):
+        txt, data = run_paths(Path(meta["source"]), meta["model"], run_dir)[:2]
+        return data if data.exists() and txt.exists() else None
+    # Runs from before RUN_FILE: the transcript has the shortest name, since stage files add to it.
+    candidates = [p for p in run_dir.glob("*.json") if not p.name.startswith(".") and p.with_suffix(".txt").exists()]
+    for path in sorted(candidates, key=lambda p: len(p.name)):
+        try:
+            if not json.loads(path.read_text(encoding="utf-8")).get("kind"):
+                return path
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def stopped_at(job: dict) -> str:
+    done, total = job.get("processed") or 0, job.get("duration")
+    return f"{fmt_time(done)} of {fmt_time(total)}" if total else fmt_time(done)
+
+
 def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     settings = settings or Settings.from_env()
     app = Flask(__name__)
@@ -134,12 +214,20 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     )
     jobs = {}
     lock = Lock()
+    meta_lock = Lock()  # RUN_FILE is read, changed and written back from several threads
     edit_lock = Lock()  # one word fix at a time: each rewrites the transcript files and may save the dictionary
     xlit = []  # the IndicXlit engine for editor suggestions, loaded on first use
-    pool = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
+    # Transcription needs the GPU, one recording at a time. Gujlish and the Gemini stages need neither.
+    gpu = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-gpu")
+    text = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="asr-text")
+    workers = {}  # (job id, step) -> its running process; step is "transcribe" or a stage key
+    tasks = {}  # (job id, step) -> the queued task allowed to run it; stopping or queueing again changes it
+    stopping = {}  # (job id, step) -> why its process is being stopped: "pause", "stop" or "delete"
+    deleted = set()  # run folders being removed in the background
     uploads_dir = Path(tempfile.gettempdir()) / "gujlish-uploads"  # local disk, not the mounted bucket
     last_sweep = [0.0]
     sequence = [0]
+    recovered = [False]
     app.extensions["asr_jobs"] = jobs
     app.extensions["asr_settings"] = settings
 
@@ -153,12 +241,103 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     def owns(job: dict) -> bool:
         return not settings.hosted or job.get("owner") == owner_tag()
 
+    def run_dirs() -> list[Path]:
+        return [path for path in storage.TRANSCRIPTS.glob("*/*/*/") if path.is_dir() and str(path) not in deleted]
+
+    def load_run(run_dir: Path) -> dict | None:
+        """A job record rebuilt from a run folder: finished, paused, or cut short by a restart."""
+        meta = read_meta(run_dir)
+        owner = run_dir / OWNER_FILE
+        record = {
+            "id": run_id(run_dir),
+            "run_dir": str(run_dir),
+            "owner": owner.read_text(encoding="utf-8") if settings.hosted and owner.exists() else None,
+            "started": started(run_dir),
+        }
+        try:
+            transcript = find_transcript(run_dir, meta)
+            if transcript:
+                data = json.loads(transcript.read_text(encoding="utf-8"))
+                record.update(name=data["source"], model=data["model"], mode=data.get("mode"))
+                record.update(duration=data["duration"], status="complete", progress=100, message="Transcript ready")
+                record.update(txt=str(transcript.with_suffix(".txt")), json=str(transcript))
+            elif meta.get("source"):
+                record.update(name=meta["source"], model=meta["model"], mode=meta.get("mode"))
+                checkpoint = run_paths(Path(meta["source"]), meta["model"], run_dir)[3]
+                done = json.loads(checkpoint.read_text(encoding="utf-8"))["segments"] if checkpoint.exists() else []
+                record.update(duration=meta.get("duration"), processed=done[-1]["end"] if done else 0)
+                if record["duration"]:
+                    record["progress"] = min(99, round(record["processed"] / record["duration"] * 100))
+                if meta.get("paused"):
+                    record.update(
+                        status="paused", message=f"Paused at {stopped_at(record)}. Resume continues from there."
+                    )
+                else:
+                    reason = meta.get("failed") or f"Stopped at {stopped_at(record)} when the server restarted."
+                    record.update(status="error", message=reason)
+            else:
+                return None
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            return None
+        source = storage.RECORDINGS / record["name"]
+        record["source"] = str(source)
+        record["size"] = meta.get("size") or (source.stat().st_size if source.is_file() else None)
+        return record
+
+    def restore(job_id: str) -> dict | None:
+        """Load a run this server has not seen yet, e.g. one a page opened before a restart. The caller holds the lock."""
+        for run_dir in run_dirs():
+            if run_id(run_dir) == job_id:
+                record = load_run(run_dir)
+                if record:
+                    jobs[job_id] = record
+                return record
+        return None
+
     def find_job(job_id: str) -> dict:
-        """The job dict (under the lock's protection by the caller), or 404 for unknown or someone else's job."""
-        job = jobs.get(job_id)
+        """The job dict (the caller holds the lock), or 404 for an unknown run or someone else's."""
+        job = jobs.get(job_id) or (restore(job_id) if HEX_ID.fullmatch(job_id) else None)
         if not job or not owns(job):
             abort(404)
         return job
+
+    def all_runs() -> list[dict]:
+        """Every run on disk, newest first, loading the ones this server has not seen yet."""
+        found = []
+        for run_dir in sorted(run_dirs(), key=lambda path: path.name, reverse=True):
+            job_id = run_id(run_dir)
+            with lock:
+                job = jobs.get(job_id)
+            if job is None:
+                record = load_run(run_dir)
+                if not record:
+                    continue
+                with lock:
+                    job = jobs.setdefault(job_id, record)
+            found.append(job)
+        return found
+
+    def update_meta(run_dir, change) -> None:
+        """Read the run's RUN_FILE, let `change` edit it, write it back. Skipped once the run is being deleted."""
+        with meta_lock:
+            if str(run_dir) in deleted or not Path(run_dir).is_dir():
+                return
+            meta = read_meta(run_dir)
+            change(meta)
+            write_json(Path(run_dir) / RUN_FILE, meta)
+
+    def drop_meta(run_dir, *keys):
+        update_meta(run_dir, lambda meta: [meta.pop(key, None) for key in keys])
+
+    def finish_pending(run_dir, keys, progressed=False):
+        def change(meta):
+            meta["pending"] = [key for key in meta.get("pending", []) if key not in keys]
+            if not meta["pending"]:
+                del meta["pending"]
+            if progressed:
+                meta.pop("resumes", None)
+
+        update_meta(run_dir, change)
 
     def sweep():
         """Delete runs and recordings older than the retention period (hosted sites)."""
@@ -171,10 +350,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             busy |= {job.get("source") for job in jobs.values() if job.get("status") in ACTIVE}
         for run_dir in storage.TRANSCRIPTS.glob("*/*/*/"):
             try:
-                started = datetime.strptime(run_dir.name, "%Y%m%d-%H%M%S-%f")
+                started_at = datetime.strptime(run_dir.name, "%Y%m%d-%H%M%S-%f")
             except ValueError:
                 continue
-            if started < cutoff and str(run_dir) not in busy:
+            if started_at < cutoff and str(run_dir) not in busy:
                 shutil.rmtree(run_dir, ignore_errors=True)
                 with lock:
                     for job_id in [k for k, job in jobs.items() if job.get("run_dir") == str(run_dir)]:
@@ -192,43 +371,79 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             if old and path.is_file() and str(path) not in busy and not path.name.startswith("."):
                 path.unlink(missing_ok=True)
 
-    def update(job_id, **fields):
+    def started_worker(job_id, step, worker):
+        """Keep a running process so it can be stopped, and stop it at once if that was asked before it started."""
         with lock:
-            jobs[job_id].update(fields)
+            workers[(job_id, step)] = worker
+            asked = (job_id, step) in stopping
+        if asked:
+            stop_worker(worker)
 
-    def process(job_id, source, run_dir, model, mode):
-        update(job_id, status="loading", message="Loading the model. The first run may download model weights.")
+    def finished_worker(job_id, step, token):
+        """Forget the step's process and task; return why it was stopped, if it was."""
+        with lock:
+            workers.pop((job_id, step), None)
+            if tasks.get((job_id, step)) == token:
+                del tasks[(job_id, step)]
+            return stopping.pop((job_id, step), None)
+
+    def queue_transcription(job_id, message):
+        token = uuid4().hex
+        with lock:
+            sequence[0] += 1
+            tasks[(job_id, "transcribe")] = token
+            jobs[job_id].update(status="queued", message=message, seq=sequence[0])
+        gpu.submit(process, job_id, token)
+
+    def process(job_id, token):
+        with lock:
+            job = jobs.get(job_id)
+            if not job or tasks.get((job_id, "transcribe")) != token:
+                return  # deleted, paused or queued again since
+            job.update(status="loading", message="Loading the model. The first run may download model weights.")
+            run_dir = Path(job["run_dir"])
+            command = [sys.executable, str(ROOT / "transcribe.py"), job["source"], job["model"]]
+            command += ["--mode", job.get("mode") or "mixed", "--output-dir", str(run_dir)]
+            command += ["--dictionary", str(dictionary_path()), "--progress-json"]
+
+        def change(**fields):
+            with lock:
+                job.update(fields)
 
         def on_event(event):
             if event["stage"] == "transcribing":
-                processed = event["processed"]
-                total = jobs[job_id]["duration"]
+                processed, total = event["processed"], job.get("duration")
                 percent = min(99, round(processed / total * 100)) if total else None
-                update(
-                    job_id,
+                change(
                     status="transcribing",
                     processed=processed,
                     progress=percent,
                     message=f"Transcribing · {event['chunks']} chunks completed",
                 )
             elif event["stage"] == "complete":
-                update(job_id, txt=event["txt"], json=event["json"])
+                change(txt=event["txt"], json=event["json"])
             elif event["stage"] == "loading":
-                update(job_id, device=event["device"])
+                change(device=event["device"])
 
-        command = [sys.executable, str(ROOT / "transcribe.py"), str(source), model, "--mode", mode]
-        command += ["--output-dir", str(run_dir), "--dictionary", str(dictionary_path()), "--progress-json"]
-        try:
-            code, logs = run_worker(command, on_event)
-            if code or not jobs[job_id].get("txt"):
-                raise RuntimeError(last_error(logs, "Transcription stopped. You can retry to resume completed chunks."))
-            set_stage(job_id, "gujlish", status="queued", progress=None, message="Writing Gujlish…")
-            update(job_id, status="complete", progress=100, message="Transcript ready")
-        except Exception as error:
-            update(job_id, status="error", message=str(error))
+        code, logs = run_worker(command, on_event, lambda worker: started_worker(job_id, "transcribe", worker))
+        reason = finished_worker(job_id, "transcribe", token)
+        finished = not code and job.get("txt")
+        if reason == "delete":
+            shutil.rmtree(run_dir, ignore_errors=True)  # in case it wrote after the folder was removed
             return
+        if reason == "pause" and not finished:
+            change(status="paused", message=f"Paused at {stopped_at(job)}. Resume continues from there.")
+            update_meta(run_dir, lambda meta: meta.update(paused=True))
+            return
+        if not finished:
+            message = last_error(logs, "Transcription stopped. You can retry to resume completed chunks.")
+            change(status="error", message=message)
+            update_meta(run_dir, lambda meta: meta.update(failed=message))
+            return
+        drop_meta(run_dir, "resumes", "failed", "paused")
         # Gujlish follows straight away; English and the summary wait until you have fixed the words.
-        run_stage(job_id, "gujlish", stage_command(jobs[job_id]["json"], "gujlish"))
+        queue_stages(job_id, ("gujlish",))
+        change(status="complete", progress=100, message="Transcript ready")
 
     def stage_command(transcript_json, key, engine="auto"):
         command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
@@ -236,38 +451,110 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             command += ["--dictionary", str(dictionary_path()), "--engine", engine]
         return command
 
-    def set_stage(job_id, key, **fields):
+    def set_stage(job, key, **fields):
         with lock:
-            jobs[job_id].setdefault(key, {}).update(fields)
+            job.setdefault(key, {}).update(fields)
 
-    def run_stage(job_id, key, command):
-        """Run a stage's worker script as a subprocess, mirroring its progress events into the job."""
+    def queue_stages(job_id, keys, engine="auto"):
+        token = uuid4().hex
+        with lock:
+            job = jobs[job_id]
+            for key in keys:
+                tasks[(job_id, key)] = token
+                job[key] = {"status": "queued", "progress": None, "message": "Waiting to start…"}
+            steps = [(key, stage_command(job["json"], key, engine)) for key in keys]
+
+        def change(meta):
+            meta["pending"] = sorted({*meta.get("pending", []), *keys})
+            meta["engine"] = engine
+
+        update_meta(job["run_dir"], change)
+        text.submit(run_stages, job_id, steps, token)
+
+    def run_stage(job_id, key, command, token) -> bool:
+        """Run a stage's worker script as a subprocess, mirroring its progress events into the job. True when done."""
+        with lock:
+            job = jobs.get(job_id)
+            if not job or tasks.get((job_id, key)) != token:
+                return False
         verb = STAGES[key].verb
-        set_stage(job_id, key, status="running", progress=None, message=f"{verb}…")
+        set_stage(job, key, status="running", progress=None, message=f"{verb}…")
 
         def on_event(event):
             if event["stage"] in PROGRESS_EVENTS and event["total"]:
                 percent = min(99, round(event["done"] / event["total"] * 100))
-                set_stage(job_id, key, progress=percent, message=f"{verb} · {event['done']} of {event['total']}")
+                set_stage(job, key, progress=percent, message=f"{verb} · {event['done']} of {event['total']}")
 
         try:
-            code, logs = run_worker(command, on_event)
-            if code or not stage_output(jobs[job_id]["json"], key).exists():
-                raise RuntimeError(last_error(logs, f"{verb} stopped. Start it again to resume."))
-            set_stage(job_id, key, status="complete", progress=100, message="Ready")
-        except Exception as error:
-            set_stage(job_id, key, status="error", message=str(error))
+            code, logs = run_worker(command, on_event, lambda worker: started_worker(job_id, key, worker))
+        except OSError as error:
+            code, logs = 1, [f"Error: {error}"]
+        reason = finished_worker(job_id, key, token)
+        if reason == "delete":
+            shutil.rmtree(job["run_dir"], ignore_errors=True)
+            return False
+        if reason == "stop":
+            set_stage(job, key, status="idle", progress=None, message=STOPPED)
+        elif not code and stage_output(job["json"], key).exists():
+            set_stage(job, key, status="complete", progress=100, message="Ready")
+        else:
+            set_stage(job, key, status="error", message=last_error(logs, f"{verb} stopped. Start it again to resume."))
+        done = job[key]["status"] == "complete"
+        finish_pending(job["run_dir"], {key}, progressed=done)
+        return done
 
-    def run_stages(job_id, steps):
-        """Run stages in order (translation, then the summary), stopping at the first that fails."""
+    def run_stages(job_id, steps, token):
+        """Run stages in order (translation, then the summary), stopping at the first that does not finish."""
         for index, (key, command) in enumerate(steps):
-            run_stage(job_id, key, command)
+            if run_stage(job_id, key, command, token):
+                continue
             with lock:
-                failed = jobs[job_id][key]["status"] != "complete"
-            if failed:
-                for later, _ in steps[index + 1 :]:
-                    set_stage(job_id, later, status="idle", progress=None, message="")
+                job = jobs.get(job_id)
+                later = [key for key, _ in steps[index + 1 :] if tasks.get((job_id, key)) == token]
+                for key in later:
+                    del tasks[(job_id, key)]
+            if job and later:
+                for key in later:
+                    set_stage(job, key, status="idle", progress=None, message="")
+                finish_pending(job["run_dir"], set(later))
+            return
+
+    def recover():
+        """Once per server start, resume the work a restart cut short. After MAX_RESUMES restarts in a row it waits for
+        you instead, so a recording that brings the server down cannot keep doing so."""
+        with lock:
+            if recovered[0]:
                 return
+            recovered[0] = True
+        for run_dir in run_dirs():
+            meta = read_meta(run_dir)
+            unfinished = meta.get("source") and not meta.get("paused") and not meta.get("failed")
+            if not meta.get("pending") and not unfinished:
+                continue
+            with lock:
+                job = jobs.get(run_id(run_dir)) or restore(run_id(run_dir))
+            if not job:
+                continue
+            transcribe = job["status"] == "error"
+            pending = [key for key in meta.get("pending", []) if key in STAGES] if job["status"] == "complete" else []
+            if not transcribe and not pending:
+                continue
+            if meta.get("resumes", 0) >= MAX_RESUMES:
+                update_meta(run_dir, lambda meta: meta.pop("pending", None))
+                with lock:
+                    if transcribe:
+                        job["message"] = f"Stopped after {MAX_RESUMES} server restarts in a row. Resume to try again."
+                    for key in pending:
+                        job[key] = {
+                            "status": "error",
+                            "message": "Stopped after several server restarts. Start it again.",
+                        }
+                continue
+            update_meta(run_dir, lambda meta: meta.update(resumes=meta.get("resumes", 0) + 1))
+            if transcribe:
+                queue_transcription(job["id"], "Continuing after a server restart")
+            else:
+                queue_stages(job["id"], pending, meta.get("engine", "auto"))
 
     def busy(job, *keys):
         return any((job.get(key) or {}).get("status") in {"queued", "running"} for key in keys)
@@ -288,6 +575,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     @app.before_request
     def guard_requests():
+        recover()
         # Reject cross-site upload/POST requests from other pages.
         if request.method in {"POST", "PUT"} and request.headers.get("Origin"):
             if urlparse(request.headers["Origin"]).netloc != request.host:
@@ -332,7 +620,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         )
 
     def upload_path(upload_id: str) -> Path:
-        if not UPLOAD_ID.fullmatch(upload_id):
+        if not HEX_ID.fullmatch(upload_id):
             abort(404)
         return uploads_dir / f"{owner_tag()}-{upload_id}.part"
 
@@ -378,7 +666,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         if settings.hosted:
             with lock:
                 if any(job.get("owner") == owner and job["status"] in ACTIVE for job in jobs.values()):
-                    return jsonify(error="You already have a recording in progress. Wait for it to finish."), 429
+                    message = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
+                    return jsonify(error=message), 429
         partial = upload_path(upload_id) if upload_id and not upload else None
         if partial is not None and not partial.exists():
             return jsonify(error="The upload did not finish. Please try again."), 400
@@ -410,9 +699,13 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         run_dir = new_run(source, model, mode)
         if settings.hosted:
             (run_dir / OWNER_FILE).write_text(owner, encoding="utf-8")
-        job_id = uuid4().hex
+        size = source.stat().st_size
+        write_json(
+            run_dir / RUN_FILE,
+            {"source": source.name, "model": model, "mode": mode, "duration": duration, "size": size},
+        )
+        job_id = run_id(run_dir)
         with lock:
-            sequence[0] += 1
             jobs[job_id] = {
                 "id": job_id,
                 "name": source.name,
@@ -426,9 +719,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 "source": str(source),
                 "run_dir": str(run_dir),
                 "owner": owner,
-                "seq": sequence[0],
+                "size": size,
+                "started": started(run_dir),
             }
-        pool.submit(process, job_id, source, run_dir, model, mode)
+        queue_transcription(job_id, "Queued for transcription")
         return jsonify(id=job_id), 202
 
     @app.get("/api/jobs/<job_id>")
@@ -441,6 +735,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 )
         hidden = {"source", "run_dir", "txt", "json", "owner", "seq", *STAGES}
         result = {k: v for k, v in job.items() if k not in hidden}
+        result["run"] = Path(job["run_dir"]).name
         for key in STAGES:
             result[key] = stage_view(job, key)
         if result["status"] == "complete":
@@ -505,10 +800,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return jsonify(error="Translate the transcript before summarizing it."), 409
             if busy(job, *keys):
                 return jsonify(error="This step is already running."), 409
-            for key in keys:
-                job[key] = {"status": "queued", "progress": None, "message": "Waiting for the current run…"}
-            steps = [(key, stage_command(job["json"], key, engine)) for key in keys]
-        pool.submit(run_stages, job_id, steps)
+        queue_stages(job_id, keys, engine)
         return jsonify(id=job_id), 202
 
     @app.post("/api/jobs/<job_id>/translate")
@@ -530,6 +822,102 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         if engine not in {"auto", "gemini"}:
             return jsonify(error="Choose a valid Gujlish engine."), 400
         return start_stage(job_id, "gujlish", engine=engine)
+
+    @app.post("/api/jobs/<job_id>/stop")
+    def stop_stage(job_id):
+        """Stop the Gujlish, or the English and summary. Finished parts are kept, so starting again continues."""
+        keys = {"gujlish": ("gujlish",), "english": ("translation", "summary")}.get(
+            (request.get_json(silent=True) or {}).get("stage")
+        )
+        if not keys:
+            return jsonify(error="Choose a step to stop."), 400
+        running = []
+        with lock:
+            job = find_job(job_id)
+            for key in keys:
+                state = job.get(key) or {}
+                if state.get("status") == "running":
+                    stopping[(job_id, key)] = "stop"
+                    state["message"] = "Stopping…"
+                    if (job_id, key) in workers:
+                        running.append(workers[(job_id, key)])
+                elif state.get("status") == "queued":
+                    tasks.pop((job_id, key), None)
+                    job[key] = {"status": "idle", "progress": None, "message": STOPPED}
+        for worker in running:
+            stop_worker(worker)
+        finish_pending(job["run_dir"], set(keys))
+        return jsonify(stopped=True)
+
+    @app.post("/api/jobs/<job_id>/pause")
+    def pause_job(job_id):
+        """Pause a transcription. Finished chunks are kept on disk; resuming continues after them."""
+        worker = None
+        with lock:
+            job = find_job(job_id)
+            if job["status"] not in ACTIVE:
+                return jsonify(error="Only a recording being transcribed can be paused."), 409
+            if job["status"] == "queued":
+                tasks.pop((job_id, "transcribe"), None)
+                job.update(status="paused", message=f"Paused at {stopped_at(job)}. Resume continues from there.")
+            else:
+                stopping[(job_id, "transcribe")] = "pause"
+                job["message"] = "Pausing…"
+                worker = workers.get((job_id, "transcribe"))  # not started yet: it is stopped as soon as it starts
+        if worker:
+            stop_worker(worker)
+        elif job["status"] == "paused":
+            update_meta(job["run_dir"], lambda meta: meta.update(paused=True))
+        return jsonify(paused=True)
+
+    @app.post("/api/jobs/<job_id>/resume")
+    @app.post("/api/jobs/<job_id>/retry")
+    def resume_job(job_id):
+        with lock:
+            job = find_job(job_id)
+            if job["status"] not in {"error", "paused"}:
+                return jsonify(error="Only a paused or stopped recording can be resumed."), 409
+        drop_meta(job["run_dir"], "paused", "failed", "resumes")
+        queue_transcription(job_id, "Queued to continue from where it stopped")
+        return jsonify(id=job_id), 202
+
+    def remove_run(job: dict, running: list) -> None:
+        """Wait for the run's processes to stop, then delete its folder and, if no other run uses it, its recording."""
+        for worker in running:
+            try:
+                worker.wait(timeout=STOP_GRACE_SECONDS + 5)
+            except subprocess.TimeoutExpired:
+                pass
+        run_dir = Path(job["run_dir"])
+        shutil.rmtree(run_dir, ignore_errors=True)
+        for folder in (run_dir.parent, run_dir.parent.parent):
+            try:
+                folder.rmdir()  # only succeeds once empty
+            except OSError:
+                pass
+        recording = Path(job.get("source") or "")
+        if recording.is_file() and all(other.get("source") != str(recording) for other in all_runs()):
+            recording.unlink(missing_ok=True)
+
+    @app.post("/api/jobs/<job_id>/delete")
+    def delete_job(job_id):
+        """Cancel or delete a run: stop whatever it is doing, then remove its files in the background."""
+        running = []
+        with lock:
+            job = find_job(job_id)
+            del jobs[job_id]
+            deleted.add(job["run_dir"])
+            for step in ("transcribe", *STAGES):
+                tasks.pop((job_id, step), None)
+                started_step = job["status"] in {"loading", "transcribing"} if step == "transcribe" else busy(job, step)
+                if started_step or (job_id, step) in workers:
+                    stopping[(job_id, step)] = "delete"
+                if (job_id, step) in workers:
+                    running.append(workers[(job_id, step)])
+        for worker in running:
+            stop_worker(worker)
+        Thread(target=remove_run, args=(job, running), daemon=True).start()
+        return jsonify(deleted=True)
 
     @app.post("/api/jobs/<job_id>/edit")
     def edit_job(job_id):
@@ -627,17 +1015,6 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             save_dictionary(data)
         return jsonify(ok=True)
 
-    @app.post("/api/jobs/<job_id>/retry")
-    def retry_job(job_id):
-        with lock:
-            job = find_job(job_id)
-            if job["status"] != "error":
-                return jsonify(error="Only a failed run can be retried."), 409
-            job.update(status="queued", message="Queued to resume completed chunks")
-            values = (Path(job["source"]), Path(job["run_dir"]), job["model"], job["mode"])
-        pool.submit(process, job_id, *values)
-        return jsonify(id=job_id), 202
-
     @app.get("/api/jobs/<job_id>/download/<kind>")
     def download(job_id, kind):
         with lock:
@@ -691,45 +1068,24 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     @app.get("/api/history")
     def history():
-        # Re-open saved runs after restarting the server without a database.
+        """Every run you can open, newest first, with what each one is doing right now."""
         sweep()
-        owner = owner_tag()
-        completed = []
-        paths = sorted(storage.TRANSCRIPTS.glob("*/*/*/*.json"), key=lambda path: path.parent.name, reverse=True)
-        for path in paths:
-            if path.name.startswith(".") or not path.with_suffix(".txt").exists():
-                continue
-            try:
-                run_owner = (path.parent / OWNER_FILE).read_text(encoding="utf-8") if settings.hosted else None
-                if settings.hosted and run_owner != owner:
+        fields = ("id", "name", "model", "mode", "status", "progress", "message", "duration", "size", "started")
+        runs = []
+        for job in all_runs():
+            with lock:
+                if not owns(job):
                     continue
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("kind"):  # translation/summary files share the folder but are not transcripts
-                    continue
-                job_id = hashlib.sha256(str(path).encode()).hexdigest()[:32]
-                record = {
-                    "id": job_id,
-                    "name": data["source"],
-                    "model": data["model"],
-                    "mode": data.get("mode"),
-                    "duration": data["duration"],
-                    "status": "complete",
-                    "progress": 100,
-                    "message": "Transcript ready",
-                    "txt": str(path.with_suffix(".txt")),
-                    "json": str(path),
-                    "run": path.parent.name,
-                    "owner": run_owner,
-                    "run_dir": str(path.parent),
-                }
-                with lock:
-                    jobs.setdefault(job_id, record)
-                completed.append({k: record[k] for k in ("id", "name", "model", "mode", "run")})
-            except (OSError, ValueError, KeyError):
-                continue
-            if len(completed) >= 50:
+                entry = {key: job.get(key) for key in fields}
+                entry["run"] = Path(job["run_dir"]).name
+                for key in STAGES:
+                    state = job.get(key) or {}
+                    if state.get("status") in {"queued", "running", "error"}:
+                        entry[key] = {"status": state["status"], "progress": state.get("progress")}
+            runs.append(entry)
+            if len(runs) >= 100:
                 break
-        return jsonify(completed)
+        return jsonify(runs)
 
     @app.errorhandler(413)
     def too_large(_error):

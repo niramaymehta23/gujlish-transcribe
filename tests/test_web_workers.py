@@ -6,32 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, FakeWorker, event
 from web.server import create_app
-
-
-class FakeWorker:
-    """Stands in for subprocess.Popen: yields the given output lines, then exits with `code`."""
-
-    def __init__(self, lines, code=0, on_wait=None):
-        self.stdout = iter(line + "\n" for line in lines)
-        self.code = code
-        self.on_wait = on_wait
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return False
-
-    def wait(self):
-        if self.on_wait:
-            self.on_wait()
-        return self.code
-
-
-def event(**fields) -> str:
-    return "ASR_EVENT " + json.dumps(fields)
 
 
 class TestWorkers(unittest.TestCase):
@@ -87,7 +63,9 @@ class TestWorkers(unittest.TestCase):
         self.assertTrue(command[1].endswith("transcribe.py"))
         self.assertIn("--progress-json", command)
         self.assertIn("--dictionary", command)
-        self.assertTrue(self.commands[1][1].endswith("transliterate.py"))  # Gujlish follows on its own
+        (key, gujlish), *_ = self.executor.tasks[-1][1][1]  # Gujlish follows on its own, on the other queue
+        self.assertTrue(gujlish[1].endswith("transliterate.py"))
+        self.assertEqual(self.job["gujlish"]["status"], "queued")
         self.assertEqual(seen[0]["device"], "cpu")
         self.assertEqual(seen[0]["processed"], 4.0)
         self.assertEqual(seen[0]["progress"], 40)
