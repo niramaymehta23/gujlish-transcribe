@@ -108,6 +108,25 @@ class TestWorkflow(unittest.TestCase):
         self.assertIsNone(plot)
         self.assertEqual(events[-1]["stage"], "complete")
 
+    def test_dictionary_fixes_words_after_merging(self):
+        dictionary = self.root / "dictionary.json"
+        dictionary.write_text(
+            json.dumps({"corrections": [{"id": "a", "heard": "નીરમય", "correct": "નિરામય"}]}), encoding="utf-8"
+        )
+        output = self.root / "transcripts" / "run"
+        argv = [str(self.source), "flex", "--chunking", "fixed", "--output-dir", str(output)]
+
+        class Backend:
+            def transcribe(self, samples, start, end, mode):
+                return {"start": start, "end": end, "text": "હું નીરમય." if start == 0 else "આવ્યો નીરમય"}
+
+        with patch("asr.cli.choose_device", return_value="cpu"), patch("asr.cli.load_backend", return_value=Backend()):
+            txt, data, _ = run(build_parser().parse_args(argv + ["--dictionary", str(dictionary)]))
+        self.assertEqual(txt.read_text(encoding="utf-8").strip(), "હું નિરામય. આવ્યો નિરામય")
+        segments = json.loads(data.read_text(encoding="utf-8"))["segments"]
+        self.assertEqual(segments[0]["fixes"], [{"start": 1, "end": 2, "heard": "નીરમય.", "rule": "a"}])
+        self.assertIn("નિરામય", txt.with_suffix(".srt").read_text(encoding="utf-8"))
+
     def test_reset_discards_the_old_matching_checkpoint(self):
         transcripts = self.root / "transcripts"
         argv = [str(self.source), "flex", "--device", "cpu", "--chunking", "fixed"]

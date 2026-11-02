@@ -16,8 +16,12 @@ from .audio_stream import (
     load_detector,
     require_ffmpeg,
 )
+from .dictionary import apply_corrections
+from .dictionary import load as load_dictionary
+from .edits import transcript_text
 from .enrich import STAGE_ERRORS, add_llm_arguments, run_stages
 from .guards import check_segment
+from .gujlish import Transliterator, run_gujlish
 from .postprocess import confidence_plot, correct_segments, load_vocabulary, merge_segments
 from .segmenter import split_chunk
 from .storage import TRANSCRIPTS, new_run, run_label, run_paths
@@ -170,6 +174,12 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
     if vocabulary:
         correct_segments(segments, vocabulary)
     transcript = merge_segments(segments)
+    if args.dictionary:
+        # After merging, so the fix positions it records match the final segment text.
+        fixed = apply_corrections(segments, load_dictionary(args.dictionary.expanduser())["corrections"])
+        if fixed:
+            print(f"Dictionary: fixed {fixed} word(s)", flush=True)
+            transcript = transcript_text(segments)
     flagged = [s for s in segments if s.get("flags")]
     if flagged:
         times = ", ".join(f"{s['start']:.0f}s" for s in flagged[:10])
@@ -235,6 +245,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--denoise", action="store_true", help="Apply FFmpeg's lightweight noise filter to the decoded stream"
     )
     parser.add_argument("--vocab", type=Path, help="JSON mapping preferred words to explicit ASR variants")
+    parser.add_argument(
+        "--dictionary", type=Path, help="Correction dictionary saved by the web app (dictionary.json); fixes words"
+    )
+    parser.add_argument("--gujlish", action="store_true", help="After transcribing, also write the Gujlish version")
     parser.add_argument("--plot", action="store_true", help="After Gujlish transcription, write one confidence plot")
     parser.add_argument("--reset", action="store_true", help="Discard the matching partial checkpoint")
     parser.add_argument(
@@ -253,6 +267,9 @@ def main() -> None:
     try:
         progress = (lambda event: print("ASR_EVENT " + json.dumps(event), flush=True)) if args.progress_json else None
         outputs = list(run(args, progress=progress))
+        if args.gujlish:
+            overrides = load_dictionary(args.dictionary.expanduser())["gujlish"] if args.dictionary else {}
+            outputs += run_gujlish(outputs[1], Transliterator(overrides=overrides), progress).values()
         if args.translate or args.summarize:
             outputs += run_stages(
                 outputs[1], args, translate=args.translate, summarize=args.summarize, progress=progress

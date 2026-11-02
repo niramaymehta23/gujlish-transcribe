@@ -26,10 +26,13 @@ def new_run(source: Path, model: str, mode: str) -> Path:
 
 
 def stage_paths(transcript_json: Path, label: str | None = None) -> dict[str, Path]:
-    """Output paths for the translation and summary stages, next to a run's `<name>.<model>.json` transcript."""
+    """Output paths for the Gujlish, translation and summary stages, next to a run's `<name>.<model>.json`."""
     stem, folder = transcript_json.stem, transcript_json.parent
     tag = f"-{label}" if label else ""
     return {
+        "gujlish_txt": folder / f"{stem}.gujlish.txt",
+        "gujlish_json": folder / f"{stem}.gujlish.json",
+        "gujlish_srt": folder / f"{stem}.gujlish.srt",
         "translation_txt": folder / f"{stem}.en{tag}.txt",
         "translation_json": folder / f"{stem}.en{tag}.json",
         "translation_srt": folder / f"{stem}.en{tag}.srt",

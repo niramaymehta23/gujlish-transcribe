@@ -1,4 +1,4 @@
-"""A local upload server that runs one worker subprocess at a time (transcribe, translate or summarize)."""
+"""A local upload server that runs one worker subprocess at a time (transcribe, Gujlish, translate or summarize)."""
 
 import hashlib
 import hmac
@@ -16,13 +16,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import asr.storage as storage
+from asr.dictionary import clips_dir, dictionary_path, forget, remember, save_clip
+from asr.dictionary import load as load_dictionary
+from asr.dictionary import save as save_dictionary
+from asr.edits import load_gujlish, matches, replace_words, save_transcript
+from asr.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
 from asr.llm import gemini_available
 from asr.storage import ROOT, new_run, stage_paths
 from asr.subtitles import to_srt
@@ -40,8 +45,8 @@ EVENT_PREFIX = "ASR_EVENT "
 
 @dataclass(frozen=True)
 class Stage:
-    """One English stage. Each goes by several names: job key ("translation"), URL (/translate), worker script,
-    output file, and progress event ("translating")."""
+    """One stage after transcription. Each goes by several names: job key ("translation"), URL (/translate), worker
+    script, output file, and progress event ("translating")."""
 
     script: str
     output: str  # key in asr.storage.stage_paths
@@ -49,9 +54,11 @@ class Stage:
 
 
 STAGES = {
+    "gujlish": Stage("transliterate.py", "gujlish_json", "Writing Gujlish"),
     "translation": Stage("translate.py", "translation_txt", "Translating"),
     "summary": Stage("summarize.py", "summary_md", "Summarizing"),
 }
+PROGRESS_EVENTS = {"transliterating", "translating", "summarizing"}
 
 
 def stage_output(transcript_json: str, key: str) -> Path:
@@ -127,6 +134,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     )
     jobs = {}
     lock = Lock()
+    edit_lock = Lock()  # one word fix at a time: each rewrites the transcript files and may save the dictionary
+    xlit = []  # the IndicXlit engine for editor suggestions, loaded on first use
     pool = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr")
     uploads_dir = Path(tempfile.gettempdir()) / "gujlish-uploads"  # local disk, not the mounted bucket
     last_sweep = [0.0]
@@ -208,26 +217,36 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 update(job_id, device=event["device"])
 
         command = [sys.executable, str(ROOT / "transcribe.py"), str(source), model, "--mode", mode]
-        command += ["--output-dir", str(run_dir), "--progress-json"]
+        command += ["--output-dir", str(run_dir), "--dictionary", str(dictionary_path()), "--progress-json"]
         try:
             code, logs = run_worker(command, on_event)
             if code or not jobs[job_id].get("txt"):
                 raise RuntimeError(last_error(logs, "Transcription stopped. You can retry to resume completed chunks."))
+            set_stage(job_id, "gujlish", status="queued", progress=None, message="Writing Gujlish…")
             update(job_id, status="complete", progress=100, message="Transcript ready")
         except Exception as error:
             update(job_id, status="error", message=str(error))
+            return
+        # Gujlish follows straight away; English and the summary wait until you have fixed the words.
+        run_stage(job_id, "gujlish", stage_command(jobs[job_id]["json"], "gujlish"))
+
+    def stage_command(transcript_json, key, engine="auto"):
+        command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
+        if key == "gujlish":
+            command += ["--dictionary", str(dictionary_path()), "--engine", engine]
+        return command
 
     def set_stage(job_id, key, **fields):
         with lock:
             jobs[job_id].setdefault(key, {}).update(fields)
 
     def run_stage(job_id, key, command):
-        """Run translate.py / summarize.py as a subprocess, mirroring its progress events into the job."""
+        """Run a stage's worker script as a subprocess, mirroring its progress events into the job."""
         verb = STAGES[key].verb
         set_stage(job_id, key, status="running", progress=None, message=f"{verb}…")
 
         def on_event(event):
-            if event["stage"] in {"translating", "summarizing"} and event["total"]:
+            if event["stage"] in PROGRESS_EVENTS and event["total"]:
                 percent = min(99, round(event["done"] / event["total"] * 100))
                 set_stage(job_id, key, progress=percent, message=f"{verb} · {event['done']} of {event['total']}")
 
@@ -238,6 +257,25 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             set_stage(job_id, key, status="complete", progress=100, message="Ready")
         except Exception as error:
             set_stage(job_id, key, status="error", message=str(error))
+
+    def run_stages(job_id, steps):
+        """Run stages in order (translation, then the summary), stopping at the first that fails."""
+        for index, (key, command) in enumerate(steps):
+            run_stage(job_id, key, command)
+            with lock:
+                failed = jobs[job_id][key]["status"] != "complete"
+            if failed:
+                for later, _ in steps[index + 1 :]:
+                    set_stage(job_id, later, status="idle", progress=None, message="")
+                return
+
+    def busy(job, *keys):
+        return any((job.get(key) or {}).get("status") in {"queued", "running"} for key in keys)
+
+    def transliterator(overrides):
+        if not xlit and xlit_installed():
+            xlit.append(XlitEngine())
+        return Transliterator(xlit[0] if xlit else KnownWordsOnly(), overrides)
 
     def stage_view(job, key):
         """Stage state for the browser; files already on disk count as complete (e.g. after a server restart)."""
@@ -401,19 +439,47 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 job["ahead"] = sum(
                     1 for other in jobs.values() if other["status"] in ACTIVE and other.get("seq", 0) < job["seq"]
                 )
-        hidden = {"source", "run_dir", "txt", "json", "translation", "summary", "owner", "seq"}
+        hidden = {"source", "run_dir", "txt", "json", "owner", "seq", *STAGES}
         result = {k: v for k, v in job.items() if k not in hidden}
-        result["translation"] = stage_view(job, "translation")
-        result["summary"] = stage_view(job, "summary")
+        for key in STAGES:
+            result[key] = stage_view(job, key)
         if result["status"] == "complete":
             result["text"] = Path(job["txt"]).read_text(encoding="utf-8")
             if job.get("json"):
-                paths = stage_paths(Path(job["json"]))
-                if result["translation"]["status"] == "complete":
-                    result["translation_text"] = paths["translation_txt"].read_text(encoding="utf-8")
-                if result["summary"]["status"] == "complete":
-                    result["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
+                result.update(transcript_view(Path(job["json"]), result))
         return jsonify(result)
+
+    def transcript_view(transcript_json: Path, state: dict) -> dict:
+        """Segments for the word editor, the Gujlish words lined up with them, the English and summary texts, and
+        whether those were made before the latest word fixes."""
+        segments = json.loads(transcript_json.read_text(encoding="utf-8")).get("segments", [])
+        paths = stage_paths(transcript_json)
+        gujlish, _ = load_gujlish(paths["gujlish_json"], segments)
+        view = {
+            "segments": [
+                {"start": s["start"], "end": s["end"], "text": s.get("text", ""), "fixes": s.get("fixes", [])}
+                for s in segments
+            ],
+            "gujlish_tokens": gujlish,
+            "rev": "-".join(
+                str(path.stat().st_mtime_ns) for path in (transcript_json, paths["gujlish_json"]) if path.exists()
+            ),
+        }
+        if gujlish is not None:
+            view["gujlish_text"] = paths["gujlish_txt"].read_text(encoding="utf-8")
+        if state["translation"]["status"] == "complete":
+            view["translation_text"] = paths["translation_txt"].read_text(encoding="utf-8")
+            if paths["translation_json"].exists():
+                english = json.loads(paths["translation_json"].read_text(encoding="utf-8")).get("segments", [])
+                current = [s["text"].strip() for s in segments if s.get("text", "").strip()]
+                view["english_stale"] = [s.get("source") for s in english] != current
+        if state["summary"]["status"] == "complete":
+            view["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
+            made = paths["translation_json"]
+            view["summary_stale"] = view.get("english_stale", False) or (
+                made.exists() and paths["summary_md"].stat().st_mtime < made.stat().st_mtime
+            )
+        return view
 
     def gemini_ready() -> bool:
         # Hosted sites use Gemini only when the owner allows it, because it runs on the owner's key.
@@ -424,10 +490,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         # Whether translation/summaries can run. The key itself stays in the server's environment.
         return jsonify(hosted=settings.hosted, gemini=gemini_ready())
 
-    def start_stage(job_id, key):
+    def start_stage(job_id, *keys, engine="auto"):
         with lock:
             find_job(job_id)
-        if not gemini_ready():
+        if (set(keys) - {"gujlish"} or engine == "gemini") and not gemini_ready():
             if settings.hosted:
                 return jsonify(error="Translation and summaries are not enabled on this site."), 400
             return jsonify(error="Set GEMINI_API_KEY in the terminal before starting the app (see the README)."), 400
@@ -435,14 +501,14 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             job = find_job(job_id)
             if job.get("status") != "complete" or not job.get("json"):
                 return jsonify(error="Finish the transcript first."), 409
-            if key == "summary" and stage_view(job, "translation")["status"] != "complete":
+            if keys == ("summary",) and stage_view(job, "translation")["status"] != "complete":
                 return jsonify(error="Translate the transcript before summarizing it."), 409
-            if (job.get(key) or {}).get("status") in {"queued", "running"}:
+            if busy(job, *keys):
                 return jsonify(error="This step is already running."), 409
-            job[key] = {"status": "queued", "progress": None, "message": "Waiting for the current run…"}
-            transcript_json = job["json"]
-        command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
-        pool.submit(run_stage, job_id, key, command)
+            for key in keys:
+                job[key] = {"status": "queued", "progress": None, "message": "Waiting for the current run…"}
+            steps = [(key, stage_command(job["json"], key, engine)) for key in keys]
+        pool.submit(run_stages, job_id, steps)
         return jsonify(id=job_id), 202
 
     @app.post("/api/jobs/<job_id>/translate")
@@ -452,6 +518,114 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     @app.post("/api/jobs/<job_id>/summarize")
     def summarize_job(job_id):
         return start_stage(job_id, "summary")
+
+    @app.post("/api/jobs/<job_id>/english")
+    def english_job(job_id):
+        """Translate, then summarize: the step you take once the words are right."""
+        return start_stage(job_id, "translation", "summary")
+
+    @app.post("/api/jobs/<job_id>/gujlish")
+    def gujlish_job(job_id):
+        engine = (request.get_json(silent=True) or {}).get("engine", "auto")
+        if engine not in {"auto", "gemini"}:
+            return jsonify(error="Choose a valid Gujlish engine."), 400
+        return start_stage(job_id, "gujlish", engine=engine)
+
+    @app.post("/api/jobs/<job_id>/edit")
+    def edit_job(job_id):
+        """Replace words in the transcript (and the same words elsewhere in it, if asked), keep the Gujlish in step,
+        and remember the fix for future recordings unless told not to."""
+        with lock:
+            job = dict(find_job(job_id))
+        body = request.get_json(silent=True) or {}
+        try:
+            number, start, end = int(body["segment"]), int(body["start"]), int(body["end"])
+            heard = str(body["heard"])
+            correct = " ".join(str(body["correct"]).split())
+            correct_gujlish = " ".join(str(body.get("correct_gujlish") or "").split())
+        except (KeyError, TypeError, ValueError):
+            return jsonify(error="Choose the words to replace."), 400
+        if not correct:
+            return jsonify(error="Type the correct word."), 400
+        if job.get("status") != "complete" or not job.get("json"):
+            return jsonify(error="Finish the transcript first."), 409
+        if busy(job, "gujlish"):
+            return jsonify(error="Gujlish is still being written. Try again in a moment."), 409
+        with edit_lock:
+            transcript_json = Path(job["json"])
+            data = json.loads(transcript_json.read_text(encoding="utf-8"))
+            segments = data["segments"]
+            tokens = segments[number].get("text", "").split() if 0 <= number < len(segments) else []
+            if not 0 <= start < end <= len(tokens) or " ".join(tokens[start:end]) != heard:
+                return jsonify(error="This part of the transcript has changed. Reload the page and try again."), 409
+            context, segment = segments[number]["text"], segments[number]
+            paths = stage_paths(transcript_json)
+            gujlish, engine = load_gujlish(paths["gujlish_json"], segments)
+            heard_gujlish = " ".join(gujlish[number][start:end]) if gujlish else ""
+            places = [(number, start)]
+            if body.get("everywhere"):
+                size = end - start
+                places += [(n, s) for n, s in matches(segments, heard) if n != number or s + size <= start or s >= end]
+            dictionary = load_dictionary()
+            latin = replace_words(
+                segments, gujlish, places, end - start, correct, correct_gujlish, transliterator(dictionary["gujlish"])
+            )
+            save_transcript(transcript_json, data)
+            if gujlish is not None:
+                write_gujlish(transcript_json, data, gujlish, engine)
+            clip = None
+            if body.get("remember", True):
+                seconds = segment["end"] - segment["start"]
+                example = {
+                    "recording": data.get("source"),
+                    "run": transcript_json.parent.name,
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "at": round(segment["start"] + seconds * len(" ".join(tokens[:start])) / max(1, len(context)), 2),
+                    "context": context,
+                }
+                rule = remember(dictionary, heard, correct, heard_gujlish, " ".join(latin), example)
+                recording = storage.RECORDINGS / str(data.get("source") or "")
+                if rule and data.get("source") and recording.is_file():
+                    example["clip"] = f"{rule['id']}-{uuid4().hex[:6]}.ogg"
+                    clip = (recording, segment["start"], segment["end"], clips_dir() / example["clip"])
+                save_dictionary(dictionary)
+        if clip:
+            Thread(target=save_clip, args=clip, daemon=True).start()
+        return jsonify(replaced=len(places), remembered=bool(body.get("remember", True)))
+
+    @app.get("/api/transliterate")
+    def transliterate_text():
+        """Suggestions for the word editor: Gujarati for typed Gujlish (to=gu), or Gujlish for typed Gujarati."""
+        text, to = request.args.get("text", "")[:200], request.args.get("to")
+        if to not in {"gu", "latin"}:
+            abort(400)
+        try:
+            words = transliterator(load_dictionary()["gujlish"])
+            options = words.gujarati_options(text) if to == "gu" else [words.latin_text(text)] if text.strip() else []
+        except (ImportError, OSError, RuntimeError, ValueError):
+            options = []
+        return jsonify(options=[option for option in options if option.strip()])
+
+    @app.get("/api/dictionary")
+    def dictionary_entries():
+        data = load_dictionary()
+        fields = ("id", "heard", "heard_gujlish", "correct", "correct_gujlish", "added")
+        corrections = [
+            {**{key: rule.get(key) for key in fields}, "examples": len(rule.get("examples", []))}
+            for rule in reversed(data["corrections"])
+        ]
+        return jsonify(corrections=corrections, gujlish=data["gujlish"])
+
+    @app.post("/api/dictionary/forget")
+    def dictionary_forget():
+        body = request.get_json(silent=True) or {}
+        with edit_lock:
+            data = load_dictionary()
+            if not forget(data, correction=body.get("correction"), gujlish=body.get("gujlish")):
+                abort(404)
+            save_dictionary(data)
+        return jsonify(ok=True)
 
     @app.post("/api/jobs/<job_id>/retry")
     def retry_job(job_id):
@@ -494,9 +668,12 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 download_name=name,
                 mimetype="application/x-subrip; charset=utf-8",
             )
-        # English translation and summary files sit next to the transcript.
+        # Gujlish, English and summary files sit next to the transcript.
         paths = stage_paths(Path(job["json"])) if job.get("json") else {}
         wanted = {
+            "gujlish-txt": ("gujlish_txt", False),
+            "gujlish-docx": ("gujlish_txt", True),
+            "gujlish-srt": ("gujlish_srt", False),
             "en-txt": ("translation_txt", False),
             "en-docx": ("translation_txt", True),
             "summary-md": ("summary_md", False),
@@ -506,8 +683,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             abort(404)
         path, as_docx = paths[wanted[0]], wanted[1]
         if not as_docx:
-            mimetype = "text/markdown; charset=utf-8" if path.suffix == ".md" else "text/plain; charset=utf-8"
-            return send_file(path, as_attachment=True, download_name=path.name, mimetype=mimetype)
+            mimetype = {".md": "text/markdown", ".srt": "application/x-subrip"}.get(path.suffix, "text/plain")
+            return send_file(path, as_attachment=True, download_name=path.name, mimetype=f"{mimetype}; charset=utf-8")
         text = path.read_text(encoding="utf-8")
         document = markdown_docx(text, path.stem) if path.suffix == ".md" else transcript_docx(text, path.stem)
         return send_file(document, as_attachment=True, download_name=path.with_suffix(".docx").name, mimetype=docx_type)

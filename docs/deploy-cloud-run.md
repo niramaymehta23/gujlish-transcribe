@@ -6,7 +6,7 @@ This runs the web app on Google Cloud Run with one NVIDIA L4 GPU that **scales t
 
 Flex's license (the Bodhan AI Open Model License, in the model repository) requires Bodhan AI's **prior written approval** before you host Flex for other people ("Third-Party Hosting", section 3). Exceptions include registered nonprofits, trusts and societies using it for their own charitable purpose, and academic research use (section 13). If you host Flex, the site must also show "Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat." The app does this automatically whenever Flex is enabled.
 
-The deployment therefore offers only **Gujlish** (Apache 2.0) by default. Add Flex by setting `MODELS="flex,gujlish"` in `deploy/config.sh` once you have approval or are sure an exception applies. This note is not legal advice.
+This deployment runs **Flex only** (`MODELS="flex"` in `deploy/config.sh`) for the owner's personal use, behind the site password; it is not offered to other people. If that changes, get Bodhan AI's approval first, or switch back to `MODELS="gujlish"` (Apache 2.0). This note is not legal advice.
 
 ## What the hosted site does differently
 
@@ -54,7 +54,7 @@ Main Cloud Run settings, all in `deploy/deploy.sh`:
 
 - **One L4 GPU, 4 CPUs, 16 GB memory**, at most **one instance**, so the bill can't multiply and the in-memory job list stays correct.
 - **Minimum zero instances**, so you pay nothing while idle. Setting a minimum of 1 removes cold starts but bills around the clock.
-- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`.
+- **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
 ## Costs
 

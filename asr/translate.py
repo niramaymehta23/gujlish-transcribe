@@ -202,6 +202,37 @@ def bilingual_markdown(name: str, units: list[dict], translations: list[str]) ->
     return "\n".join(blocks)
 
 
+def _settings(meta: dict) -> dict:
+    """Everything that shapes a translation except the transcript text itself."""
+    return {key: value for key, value in meta.items() if key != "source"}
+
+
+def _only_transcript_changed(partial: Path, meta: dict) -> bool:
+    """An interrupted translation whose transcript has since been edited is discarded rather than refused: the
+    segments that did not change are reused from the last finished translation instead."""
+    try:
+        with partial.open(encoding="utf-8") as handle:
+            saved = json.loads(handle.readline()).get("meta")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(saved, dict) and saved.get("source") != meta["source"] and _settings(saved) == _settings(meta)
+
+
+def _unchanged(previous: Path, units: list[dict], meta: dict):
+    """(index, English, flags) for each segment whose Gujarati is the same as in the last finished translation made
+    with the same settings, so fixing a few words re-translates only the segments they are in."""
+    try:
+        old = json.loads(previous.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    segments = old.get("segments", []) if old.get("settings") == _settings(meta) and not old.get("sample") else []
+    if len(segments) != len(units):
+        return
+    for index, (unit, segment) in enumerate(zip(units, segments)):
+        if segment.get("source") == unit["text"] and "untranslated" not in segment.get("flags", []):
+            yield index, segment["text"], [flag for flag in segment.get("flags", []) if flag not in unit["asr_flags"]]
+
+
 def run_translation(
     transcript_json: Path,
     llm,
@@ -240,7 +271,7 @@ def run_translation(
     translations: list[str | None] = [None] * len(units)
     flags: list[list[str]] = [[] for _ in units]
     partial = paths["translation_partial"]
-    if reset:
+    if reset or _only_transcript_changed(partial, meta):
         partial.unlink(missing_ok=True)
     if partial.exists():
         lines = partial.read_text(encoding="utf-8").splitlines()
@@ -266,6 +297,13 @@ def run_translation(
             partial.write_text("".join(line + "\n" for line in lines[:good]), encoding="utf-8")
     else:
         partial.write_text(json.dumps({"meta": meta}, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not reset and limit is None:
+        for index, text, unit_flags in _unchanged(paths["translation_json"], units, meta):
+            if translations[index] is None:
+                translations[index], flags[index] = text, unit_flags
+                with partial.open("a", encoding="utf-8") as handle:
+                    line = {"i": index, "text": text, "flags": unit_flags}
+                    handle.write(json.dumps(line, ensure_ascii=False) + "\n")
 
     total = len(units)
     for index, unit in enumerate(units):
@@ -294,6 +332,7 @@ def run_translation(
             "llm": llm.label,
             "tone": tone,
             "prompt_version": PROMPT_VERSION,
+            "settings": _settings(meta),
             "sample": limit is not None,
             "segments": [
                 {

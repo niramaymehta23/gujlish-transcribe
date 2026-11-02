@@ -83,7 +83,8 @@ class TestStages(unittest.TestCase):
             response = self.post("translate", {"llm": "local", "model": "--evil flag"})  # ignored: Gemini only
             self.assertEqual(response.status_code, 202)
             self.assertEqual(self.post("translate").status_code, 409)
-        function, (job_id, key, command) = self.executor.tasks[0]
+        function, (job_id, steps) = self.executor.tasks[0]
+        key, command = steps[0]
         self.assertEqual(key, "translation")
         self.assertTrue(command[1].endswith("translate.py"))
         self.assertNotIn("--evil flag", command)
@@ -98,7 +99,7 @@ class TestStages(unittest.TestCase):
             (self.run_dir / "talk.flex.en.json").write_text('{"kind": "translation", "segments": []}', encoding="utf-8")
             response = self.post("summarize")
         self.assertEqual(response.status_code, 202)
-        command = self.executor.tasks[0][1][2]
+        (key, command), *_ = self.executor.tasks[0][1][1]
         self.assertTrue(command[1].endswith("summarize.py"))
 
     def test_existing_files_count_as_complete_and_download(self):

@@ -1,8 +1,10 @@
 # Gujarati Transcriber
 
-Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary, using Google's Gemini (needs your own Gemini API key; see [step 6](#translate-to-english-and-summarize-optional)).
+Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary, using Google's Gemini (needs your own Gemini API key; see [step 7](#translate-to-english-and-summarize-optional)).
 
 - **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
+- **Gujlish too.** The same transcript in Latin letters ("kem cho"), word for word, made on your computer with AI4Bharat's IndicXlit.
+- **Fix words, and it learns.** Click a misheard word, type the right one in Gujarati or Gujlish, and the fix is saved to your dictionary, which corrects every later transcript automatically.
 - **Runs locally.** Transcription happens on your computer and your audio never leaves it. Only if you translate is the transcript *text* sent to Gemini.
 - **Browser app and command line.** Drop a file into the web page, or script it from the terminal.
 - **Handles long recordings.** Audio is cut at natural pauses, and an interrupted run picks up where it stopped.
@@ -14,12 +16,13 @@ Turn Gujarati and Gujarati–English recordings into text, on your own computer.
 2. [Install](#install)
 3. [Set up Hugging Face (one time)](#set-up-hugging-face-one-time)
 4. [Run the app](#run-the-app)
-5. [Use the command line](#use-the-command-line)
-6. [Translate to English and summarize (optional)](#translate-to-english-and-summarize-optional)
-7. [Troubleshooting](#troubleshooting)
-8. [Project layout](#project-layout)
-9. [For developers](#for-developers)
-10. [License and credits](#license-and-credits)
+5. [Fix words and build your dictionary](#fix-words-and-build-your-dictionary)
+6. [Use the command line](#use-the-command-line)
+7. [Translate to English and summarize (optional)](#translate-to-english-and-summarize-optional)
+8. [Troubleshooting](#troubleshooting)
+9. [Project layout](#project-layout)
+10. [For developers](#for-developers)
+11. [License and credits](#license-and-credits)
 
 ## What you need
 
@@ -95,15 +98,28 @@ Then:
 
 1. **Add a recording.** Drop it on the page or click to choose a file. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV).
 2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can be *Mixed* (Gujarati script plus English in English letters, the default) or *Native* (everything in Gujarati script). **Gujlish** is a smaller comparison model.
-3. **Click Transcribe recording.** The progress bar follows the audio processed so far. The first run also waits for the model to download and load.
-4. **Read, copy or download** the transcript as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
-5. **Optional:** open the **English** and **Summary** tabs to translate and summarize (see [below](#translate-to-english-and-summarize-optional)).
+3. **Click Transcribe recording.** The progress bar follows the audio processed so far. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
+4. **Fix any misheard words** in the **Gujarati** or **Gujlish** tab (see [below](#fix-words-and-build-your-dictionary)).
+5. **Read, copy or download** each version as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
+6. **Optional:** once the words are right, open **English** or **Summary** and click **Translate & summarize** (see [below](#translate-to-english-and-summarize-optional)).
 
 **Previous runs** on the left reopens earlier transcripts, even after restarting the app. If a run fails or you stop it, **Retry & resume** continues from the last finished chunk instead of starting over.
 
 Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Neither folder is ever uploaded to GitHub.
 
 **Fully offline:** once the model has downloaded, start the app with `HF_HUB_OFFLINE=1 python app.py` and it never contacts Hugging Face.
+
+## Fix words and build your dictionary
+
+Speech recognition mishears some words, often the same ones every time: names, places, terms. Fix them once and the app fixes them for you from then on.
+
+1. **Click a word** in the **Gujarati** or **Gujlish** tab. Shift-click or drag to pick several words; **+ word before / after** extends the choice on a phone.
+2. **Type the right word** in either box. Typing Gujlish (English letters) fills in the Gujarati and offers spellings to tap, so you don't need a Gujarati keyboard. Typing Gujarati fills in the Gujlish. If you only respell the Gujlish, the Gujarati is kept and just the spelling is saved.
+3. **Replace.** *Also fix the other N places* changes every match in this recording. *Remember for future recordings* saves the fix to your dictionary (both are on by default).
+
+Words the dictionary fixed are underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date (an orange dot); **Update English & summary** re-translates only the lines you changed.
+
+The **Dictionary** list on the left shows what you've taught it, and **×** forgets a fix. It is stored in `dictionary.json` in the project folder (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish, the sentence it came from, its time, and a short audio clip of that stretch in `dictionary-clips/`, ready for smarter matching later.
 
 ## Use the command line
 
@@ -125,12 +141,14 @@ The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.tx
 | `--chunking pause` / `fixed` | `pause` (default) cuts the audio at the speaker's pauses and skips silence; `fixed` cuts at fixed lengths. |
 | `--denoise` | Applies a light noise filter before transcribing. |
 | `--vocab FILE` | Fixes spellings you list, for example names. See `custom_words.example.json`. |
+| `--dictionary dictionary.json` | Applies the fixes you saved in the web app. |
+| `--gujlish` | Also writes the Gujlish version (`talk.flex.gujlish.txt`, `.srt`, `.json`). |
 | `--plot` | Saves a confidence chart (Gujlish only). |
 | `--translate`, `--summarize` | Also translate and summarize afterwards (next section). |
 | `--reset` | Ignore an unfinished earlier run and start again. |
 | `--output-dir PATH` | Save results in a folder you choose. |
 
-`python transcribe.py --help` lists every option.
+`python transcribe.py --help` lists every option. For an existing run, `python transliterate.py transcripts/talk/flex-mixed/<date-time>/` writes the Gujlish (add `--engine gemini` to have Gemini spell it instead).
 
 ## Translate to English and summarize (optional)
 
@@ -157,7 +175,7 @@ This lasts until you close that terminal. To avoid repeating it, add `export GEM
 
 ### 3. Translate and summarize
 
-Open a finished transcript, go to the **English** tab and click **Translate to English**. Then open **Summary** and click **Summarize**. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
+Fix the words first, then open the **English** or **Summary** tab and click **Translate & summarize**. The corrected Gujarati (not the Gujlish, which is less precise) is translated, then summarized. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
 
 ### From the command line
 
@@ -193,6 +211,7 @@ gujlish-transcribe/
 ├── transcribe.py               # command-line transcription
 ├── translate.py                # translate a transcript to English
 ├── summarize.py                # summarize the English
+├── transliterate.py            # write a transcript in Gujlish
 ├── evaluate.py                 # measure accuracy against a reference transcript
 ├── asr/                        # speech models, audio chunking, translation and summary code
 ├── web/                        # the browser app (Flask server, page, styles, script)
@@ -201,7 +220,8 @@ gujlish-transcribe/
 ├── custom_words.example.json   # template for --vocab
 ├── glossary.example.json       # template for --glossary
 ├── recordings/                 # your recordings (kept out of Git)
-└── transcripts/                # your results (kept out of Git)
+├── transcripts/                # your results (kept out of Git)
+└── dictionary.json             # your word fixes, made in the web app (kept out of Git)
 ```
 
 ## For developers
@@ -225,7 +245,8 @@ The code in this repository is [MIT licensed](LICENSE). The speech models are no
 
 - [**Indic-Transcribe Flex**](https://huggingface.co/bodhan-ai/indic-transcribe-flex) by Bodhan AI, under the Bodhan AI Open Model License. Running it on your own computer is permitted; hosting it as a service for other people requires Bodhan AI's approval, so read its license before doing that.
 - [**Gujlish Wav2Vec2**](https://huggingface.co/WhissleAI/speech-tagger_gujlish_wav2vec2_meta) by WhissleAI, under Apache 2.0.
-- Built on FFmpeg, PyTorch, Hugging Face Transformers, Silero VAD, Flask and python-docx.
+- [**IndicXlit**](https://github.com/AI4Bharat/IndicXlit) by AI4Bharat (MIT), for Gujlish, run through a [CTranslate2 conversion](https://huggingface.co/Singla0009/all-indic-transliteration) (MIT).
+- Built on FFmpeg, PyTorch, CTranslate2, Hugging Face Transformers, Silero VAD, Flask and python-docx.
 - AI-assisted coding used.
 
 Transcripts, translations and summaries are machine-generated. Check names, numbers and quotes before sharing them.
