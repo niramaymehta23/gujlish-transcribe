@@ -26,6 +26,10 @@ recordings/*
 # The correction dictionary the web app builds from your fixes, and its audio clips.
 dictionary.json
 dictionary-clips/
+# Your channel profile, YouTube description footer and clip rules (copy the .example files to start).
+channel.md
+youtube_footer.txt
+clip_rules.md
 transcripts/*
 plots/*
 !recordings/.gitkeep

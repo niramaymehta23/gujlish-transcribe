@@ -110,7 +110,7 @@ def _progress_printer(as_json: bool):
     def show(event: dict) -> None:
         if as_json:
             print("ASR_EVENT " + json.dumps(event), flush=True)
-        elif event["stage"] in {"translating", "summarizing"}:
+        elif event["stage"] in {"translating", "summarizing", "describing", "clipping"}:
             print(f"  {event['stage']} {event['done']}/{event['total']}", flush=True)
 
     return show
@@ -156,3 +156,112 @@ def summarize_main() -> None:
     parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(tone="spoken", style_note="", glossary=None, limit=None)
     _run(parser, translate=False, summarize=True)
+
+
+def _channel_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--channel",
+        type=Path,
+        help="Text file describing the channel, its audience and style (default: channel.md in the project folder, "
+        "if there). See channel.example.md",
+    )
+    parser.add_argument("--style-note", default="", help="Extra context for this recording")
+    parser.add_argument("--llm-model", help=f"Gemini model to use (default {DEFAULT_GEMINI_MODEL})")
+    parser.add_argument("--label", help="The --label the translation was made with, if any; also tags the output")
+    parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+
+
+def youtube_main() -> None:
+    from .publish_common import read_text_file
+    from .youtube import run_youtube
+
+    parser = argparse.ArgumentParser(
+        description="Write a YouTube title, description, chapters and tags from a recording's English translation"
+    )
+    parser.add_argument(
+        "transcript", type=Path, help="The <name>.<model>.json file of a transcription run, or its folder"
+    )
+    _channel_arguments(parser)
+    parser.add_argument(
+        "--footer",
+        type=Path,
+        help="Text added word for word to the end of every description, e.g. links (default: youtube_footer.txt "
+        "in the project folder, if there)",
+    )
+    args = parser.parse_args()
+    try:
+        transcript = resolve_transcript(args.transcript)
+        channel, channel_path = read_text_file(args.channel, "channel.md")
+        footer, _ = read_text_file(args.footer, "youtube_footer.txt")
+        llm = GeminiLLM(args.llm_model)
+        print(f"Writing YouTube metadata with {llm.describe()}", flush=True)
+        if channel_path:
+            print(f"Channel profile: {channel_path}", flush=True)
+        paths = run_youtube(
+            transcript,
+            llm,
+            channel=channel,
+            footer=footer,
+            style_note=args.style_note,
+            label=args.label,
+            progress=_progress_printer(args.progress_json),
+        )
+    except STAGE_ERRORS as error:
+        parser.exit(1, f"Error: {error}\n")
+    print("Done:")
+    for output in paths.values():
+        print(f"  {output}")
+
+
+def clips_main() -> None:
+    from .clips import DEFAULT_MIN_SCORE, run_clips
+    from .publish_common import read_text_file
+
+    parser = argparse.ArgumentParser(
+        description="Find 30-second to 3-minute clips for YouTube Shorts and Instagram Reels in a recording's English "
+        "translation, judged by your channel's clip rules"
+    )
+    parser.add_argument(
+        "transcript", type=Path, help="The <name>.<model>.json file of a transcription run, or its folder"
+    )
+    parser.add_argument(
+        "--rules",
+        type=Path,
+        help="Text file with the channel's clip rules and clip types (default: clip_rules.md in the project folder, "
+        "if there). See clip_rules.example.md",
+    )
+    _channel_arguments(parser)
+    parser.add_argument(
+        "--min-score",
+        type=int,
+        default=DEFAULT_MIN_SCORE,
+        help=f"Leave out clips the model scores below this, 1-10 (default {DEFAULT_MIN_SCORE})",
+    )
+    parser.add_argument("--max-clips", type=int, help="Keep at most this many clips, best first")
+    parser.add_argument("--reset", action="store_true", help="Discard interrupted progress and start again")
+    args = parser.parse_args()
+    try:
+        transcript = resolve_transcript(args.transcript)
+        rules, rules_path = read_text_file(args.rules, "clip_rules.md")
+        channel, _ = read_text_file(args.channel, "channel.md")
+        llm = GeminiLLM(args.llm_model)
+        print(f"Finding clips with {llm.describe()}", flush=True)
+        print(f"Clip rules: {rules_path or 'none given, using general rules'}", flush=True)
+        paths = run_clips(
+            transcript,
+            llm,
+            rules=rules,
+            rules_from=rules_path.name if rules_path else "",
+            channel=channel,
+            style_note=args.style_note,
+            min_score=args.min_score,
+            max_clips=args.max_clips,
+            label=args.label,
+            reset=args.reset,
+            progress=_progress_printer(args.progress_json),
+        )
+    except STAGE_ERRORS as error:
+        parser.exit(1, f"Error: {error}\n")
+    print("Done:")
+    for output in paths.values():
+        print(f"  {output}")

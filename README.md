@@ -195,6 +195,28 @@ Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.fl
 
 Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
 
+### YouTube title, description and short clips
+
+Once the English is done, two more commands use it (same Gemini key):
+
+```bash
+python youtube.py transcripts/talk/flex-mixed/<date-time>/   # title options, description, chapters, tags
+python clips.py transcripts/talk/flex-mixed/<date-time>/     # clips for YouTube Shorts and Instagram Reels
+```
+
+- **`youtube.py`** writes `talk.flex.youtube.md` with a title (plus alternatives), a description ready to paste, chapters and tags. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
+- **`clips.py`** writes `talk.flex.clips.md`: the best clips first, each with its start and end time, length, type, score, why it fits, the English it contains and an `ffmpeg` command to cut it. Every clip is **0:30 to 3:00 long**; the program checks this from the real timings and lists anything outside the limits (or below `--min-score`, default 6) under "Not used" with the reason. Clips start and end on the transcript's chunk boundaries, which fall on the speaker's pauses.
+
+Tell them about your channel with plain-text files in the project folder (kept out of Git); copy the `.example` files to start:
+
+| File | Used by | What goes in it |
+| --- | --- | --- |
+| `clip_rules.md` | `clips.py` | Your clip types and the rules a clip must meet. Without it, general rules for short clips are used. |
+| `channel.md` | both | The channel, its audience, speakers and title style. |
+| `youtube_footer.txt` | `youtube.py` | Links and standard lines added word for word to every description. |
+
+Or pass them with `--rules`, `--channel` and `--footer`. Other options: `--style-note`, `--llm-model`, `--max-clips`, `--min-score`, and `--label` if the translation was made with one.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -217,6 +239,8 @@ gujlish-transcribe/
 ├── transcribe.py               # command-line transcription
 ├── translate.py                # translate a transcript to English
 ├── summarize.py                # summarize the English
+├── youtube.py                  # YouTube title, description and chapters from the English
+├── clips.py                    # find 0:30–3:00 clips for Shorts and Reels
 ├── transliterate.py            # write a transcript in Gujlish
 ├── evaluate.py                 # measure accuracy against a reference transcript
 ├── asr/                        # speech models, audio chunking, translation and summary code
@@ -225,6 +249,9 @@ gujlish-transcribe/
 ├── docs/                       # design notes and development history
 ├── custom_words.example.json   # template for --vocab
 ├── glossary.example.json       # template for --glossary
+├── clip_rules.example.md       # template for your clip rules (clips.py)
+├── channel.example.md          # template for your channel profile
+├── youtube_footer.example.txt  # template for the description footer
 ├── recordings/                 # your recordings (kept out of Git)
 ├── transcripts/                # your results (kept out of Git)
 └── dictionary.json             # your word fixes, made in the web app (kept out of Git)
