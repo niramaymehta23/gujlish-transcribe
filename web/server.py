@@ -70,7 +70,7 @@ class Stage:
 STAGES = {
     "gujlish": Stage("transliterate.py", "gujlish_json", "Writing Gujlish"),
     "translation": Stage("translate.py", "translation_txt", "Translating"),
-    "summary": Stage("summarize.py", "summary_md", "Summarizing"),
+    "summary": Stage("summarize.py", "summary_md", "Writing the summary & YouTube details"),
 }
 PROGRESS_EVENTS = {"transliterating", "translating", "summarizing"}
 
@@ -864,9 +864,15 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         if state["summary"]["status"] == "complete":
             view["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
             made = paths["translation_json"]
-            view["summary_stale"] = view.get("english_stale", False) or (
-                made.exists() and paths["summary_md"].stat().st_mtime < made.stat().st_mtime
+            view["youtube_missing"] = not paths["youtube_json"].exists()  # a summary from before this step wrote them
+            view["summary_stale"] = (
+                view.get("english_stale", False)
+                or view["youtube_missing"]
+                or (made.exists() and paths["summary_md"].stat().st_mtime < made.stat().st_mtime)
             )
+            if not view["youtube_missing"]:
+                youtube = json.loads(paths["youtube_json"].read_text(encoding="utf-8"))
+                view["youtube"] = {key: youtube.get(key, "") for key in ("title", "description")}
         return view
 
     def gemini_ready() -> bool:
@@ -906,7 +912,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     @app.post("/api/jobs/<job_id>/english")
     def english_job(job_id):
-        """Translate, then summarize: the step you take once the words are right."""
+        """Translate, then write the summary and YouTube details: the step you take once the words are right."""
         return start_stage(job_id, "translation", "summary")
 
     @app.post("/api/jobs/<job_id>/gujlish")

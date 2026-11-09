@@ -91,7 +91,7 @@ function runBadge(run) {
   if (run.status === 'transcribing') return [`Transcribing${percent}`, 'busy'];
   if (run.status === 'paused') return ['Paused', 'paused'];
   if (run.status === 'error') return ['Stopped', 'error'];
-  for (const [key, verb] of [['translation', 'Translating'], ['summary', 'Summarizing'], ['gujlish', 'Gujlish']]) {
+  for (const [key, verb] of [['translation', 'Translating'], ['summary', 'Writing summary'], ['gujlish', 'Gujlish']]) {
     const state = run[key];
     if (running(state)) return [state.status === 'queued' ? `${verb} soon` : `${verb}${state.progress != null ? ` ${state.progress}%` : ''}`, 'busy'];
   }
@@ -466,10 +466,11 @@ function updateStageBox() {
     state = running(translation) || translation.status === 'error' ? translation : summary;
     const stale = Boolean(current.english_stale || current.summary_stale);
     const done = translation.status === 'complete' && summary.status === 'complete';
-    explain = stale ? 'You’ve fixed words since this English was made. Updating re-translates only the lines you changed, then rewrites the summary.'
-      : done ? 'English and summary are up to date with your fixes.'
-      : 'Fix the words first. Then this translates the Gujarati into natural spoken English that keeps the speaker’s tone, and summarizes it.';
-    label = stale ? 'Update English & summary' : done ? 'Run again' : 'Translate & summarize';
+    explain = current.youtube_missing && !current.english_stale ? 'This summary was made before YouTube titles and descriptions were added. Updating rewrites it with them.'
+      : stale ? 'You’ve fixed words since this English was made. Updating re-translates only the lines you changed, then rewrites the summary and YouTube details.'
+      : done ? 'English, summary and YouTube details are up to date with your fixes.'
+      : 'Fix the words first. Then this translates the Gujarati into natural spoken English that keeps the speaker’s tone, then writes the summary, YouTube title and description.';
+    label = stale ? 'Update English, summary & YouTube' : done ? 'Run again' : 'Translate & write summary';
     if (!gemini) { label = null; unavailable = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate and summarize, set GEMINI_API_KEY in the terminal and restart the app (see the README).'; }
   }
   const busy = running(state) || (key === 'english' && (running(stageState('translation')) || running(stageState('summary'))));
@@ -509,6 +510,8 @@ function updateExports() {
     $(id).textContent = `↓ ${links[index][1]}`;
   });
   $('copy-button').textContent = 'Copy text';
+  $('copy-title').hidden = tab !== 'summary' || !current.youtube;
+  $('copy-description').hidden = tab !== 'summary' || !current.youtube;
 }
 function setTab(name) {
   tab = name; stageNotice = ''; closeEditor();
@@ -521,7 +524,7 @@ function markTabs() {
   const tabs = [
     ['gujlish', 'Gujlish', Boolean(current.gujlish_tokens), false],
     ['translation', 'English', Boolean(current.translation_text), current.english_stale],
-    ['summary', 'Summary', Boolean(current.summary_markdown), current.summary_stale],
+    ['summary', 'Summary & YouTube', Boolean(current.summary_markdown), current.summary_stale],
   ];
   for (const [id, name, has, stale] of tabs) {
     const label = $(`tab-${id}`), state = current[id]; label.replaceChildren(name);
@@ -547,6 +550,13 @@ async function startStage(path, body) {
 $('stage-button').addEventListener('click', () => startStage(stageBoxKey() === 'gujlish' ? 'gujlish' : 'english'));
 $('stage-alt').addEventListener('click', () => startStage('gujlish', { engine: 'gemini' }));
 $('stage-stop').addEventListener('click', () => act('stop', { stage: stageBoxKey() === 'gujlish' ? 'gujlish' : 'english' }));
+for (const [id, field, label] of [['copy-title', 'title', 'Copy YouTube title'], ['copy-description', 'description', 'Copy YouTube description']]) {
+  $(id).addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(current.youtube[field]); $(id).textContent = 'Copied ✓'; }
+    catch { $(id).textContent = 'Copy failed'; }
+    setTimeout(() => $(id).textContent = label, 2000);
+  });
+}
 $('copy-button').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText(tabText(tab)); $('copy-button').textContent = 'Copied ✓'; setTimeout(() => $('copy-button').textContent = 'Copy text', 2000); }
   catch { const selection = window.getSelection(); const range = document.createRange(); range.selectNodeContents($(tab)); selection.removeAllRanges(); selection.addRange(range); $('copy-button').textContent = 'Select & copy'; }
