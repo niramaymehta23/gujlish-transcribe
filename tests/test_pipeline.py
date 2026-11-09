@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 import numpy as np
 
-from asr.cli import _decode_chunk, build_parser, run
-from asr.postprocess import drop_cut_stop, drop_cut_stops, merge_segments
-from asr.segmenter import AudioChunk
-from asr.storage import new_run, run_paths
-from evaluate import error_rate
+from scripts.evaluate import error_rate
 from tests.helpers import DeferredExecutor
+from transcriber.files.storage import new_run, run_paths
+from transcriber.speech.cli import _decode_chunk, build_parser, run
+from transcriber.speech.postprocess import drop_cut_stop, drop_cut_stops, merge_segments
+from transcriber.speech.segmenter import AudioChunk
 from web.server import create_app, transcript_docx
 
 
@@ -103,7 +103,10 @@ class TestWorkflow(unittest.TestCase):
                     raise RuntimeError("Simulated interruption")
                 return {"start": start, "end": end, "text": "આજે machine learning"}
 
-        with patch("asr.cli.choose_device", return_value="cpu"), patch("asr.cli.load_backend", return_value=Backend()):
+        with (
+            patch("transcriber.speech.cli.choose_device", return_value="cpu"),
+            patch("transcriber.speech.cli.load_backend", return_value=Backend()),
+        ):
             with self.assertRaisesRegex(RuntimeError, "interruption"):
                 run(args)
         checkpoint = output / ".interview.flex.partial.json"
@@ -114,7 +117,10 @@ class TestWorkflow(unittest.TestCase):
                 return {"start": start, "end": end, "text": "machine learning વિશે વાત કરીશું"}
 
         events = []
-        with patch("asr.cli.choose_device", return_value="cpu"), patch("asr.cli.load_backend", return_value=Resumed()):
+        with (
+            patch("transcriber.speech.cli.choose_device", return_value="cpu"),
+            patch("transcriber.speech.cli.load_backend", return_value=Resumed()),
+        ):
             txt, data, plot = run(args, events.append)
         self.assertEqual(txt.name, "interview.flex.txt")
         self.assertEqual(txt.read_text().strip(), "આજે machine learning વિશે વાત કરીશું")
@@ -136,7 +142,10 @@ class TestWorkflow(unittest.TestCase):
             def transcribe(self, samples, start, end, mode):
                 return {"start": start, "end": end, "text": "હું નીરમય." if start == 0 else "આવ્યો નીરમય"}
 
-        with patch("asr.cli.choose_device", return_value="cpu"), patch("asr.cli.load_backend", return_value=Backend()):
+        with (
+            patch("transcriber.speech.cli.choose_device", return_value="cpu"),
+            patch("transcriber.speech.cli.load_backend", return_value=Backend()),
+        ):
             txt, data, _ = run(build_parser().parse_args(argv + ["--dictionary", str(dictionary)]))
         # The full stop the recognizer put at the cut is gone before the dictionary runs.
         self.assertEqual(txt.read_text(encoding="utf-8").strip(), "હું નિરામય આવ્યો નિરામય")
@@ -161,17 +170,20 @@ class TestWorkflow(unittest.TestCase):
             def transcribe(self, samples, start, end, mode):
                 return {"start": start, "end": end, "text": "નવું"}
 
-        with patch("asr.cli.TRANSCRIPTS", transcripts), patch("asr.storage.TRANSCRIPTS", transcripts):
+        with (
+            patch("transcriber.speech.cli.TRANSCRIPTS", transcripts),
+            patch("transcriber.files.storage.TRANSCRIPTS", transcripts),
+        ):
             with (
-                patch("asr.cli.choose_device", return_value="cpu"),
-                patch("asr.cli.load_backend", return_value=Failing()),
+                patch("transcriber.speech.cli.choose_device", return_value="cpu"),
+                patch("transcriber.speech.cli.load_backend", return_value=Failing()),
             ):
                 with self.assertRaisesRegex(RuntimeError, "interruption"):
                     run(build_parser().parse_args(argv))
             self.assertEqual(len(list(transcripts.glob("*/*/*/.*.partial.json"))), 1)
             with (
-                patch("asr.cli.choose_device", return_value="cpu"),
-                patch("asr.cli.load_backend", return_value=Working()),
+                patch("transcriber.speech.cli.choose_device", return_value="cpu"),
+                patch("transcriber.speech.cli.load_backend", return_value=Working()),
             ):
                 run(build_parser().parse_args(argv + ["--reset"]))
             self.assertEqual(list(transcripts.glob("*/*/*/.*.partial.json")), [])
@@ -179,8 +191,8 @@ class TestWorkflow(unittest.TestCase):
     def test_upload_collision_validation_and_downloads(self):
         executor = DeferredExecutor()
         with (
-            patch("asr.storage.RECORDINGS", self.root / "recordings"),
-            patch("asr.storage.TRANSCRIPTS", self.root / "transcripts"),
+            patch("transcriber.files.storage.RECORDINGS", self.root / "recordings"),
+            patch("transcriber.files.storage.TRANSCRIPTS", self.root / "transcripts"),
         ):
             app = create_app(executor=executor)
             client = app.test_client()
@@ -227,8 +239,8 @@ class TestWorkflow(unittest.TestCase):
 
     def test_independent_runs_and_plot_paths(self):
         with (
-            patch("asr.storage.TRANSCRIPTS", self.root / "transcripts"),
-            patch("asr.storage.PLOTS", self.root / "plots"),
+            patch("transcriber.files.storage.TRANSCRIPTS", self.root / "transcripts"),
+            patch("transcriber.files.storage.PLOTS", self.root / "plots"),
         ):
             first = new_run(self.source, "flex", "mixed")
             second = new_run(self.source, "flex", "mixed")
@@ -251,7 +263,7 @@ class TestWorkflow(unittest.TestCase):
                 json.dumps({"source": f"{name}.wav", "model": "flex", "mode": "mixed", "duration": 3.0}),
                 encoding="utf-8",
             )
-        with patch("asr.storage.TRANSCRIPTS", root):
+        with patch("transcriber.files.storage.TRANSCRIPTS", root):
             client = create_app(executor=DeferredExecutor()).test_client()
             history = client.get("/api/history").json
             self.assertEqual([entry["name"] for entry in history], ["a_new.wav", "z_old.wav"])

@@ -22,7 +22,7 @@ class TestWorkers(unittest.TestCase):
         self.txt.write_text("આજે વાત", encoding="utf-8")
         transcript = {"source": "talk.wav", "model": "flex", "mode": "mixed", "duration": 10.0, "segments": []}
         self.json.write_text(json.dumps(transcript), encoding="utf-8")
-        patcher = patch("asr.storage.TRANSCRIPTS", root / "transcripts")
+        patcher = patch("transcriber.files.storage.TRANSCRIPTS", root / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
         env = patch.dict("os.environ", {"GEMINI_API_KEY": "g"})

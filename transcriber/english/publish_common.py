@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .llm import LLMError, parse_json_object
-from .storage import DATA, stage_paths
-from .textutil import escape_tags, fmt_time
+from transcriber.english.llm import LLMError, parse_json_object
+from transcriber.files.storage import DATA, stage_paths
+from transcriber.files.textutil import escape_tags, fmt_time
 
 
 def load_translation(transcript_json: Path, label: str | None = None) -> tuple[dict, list[dict]]:
@@ -20,7 +20,7 @@ def load_translation(transcript_json: Path, label: str | None = None) -> tuple[d
     paths = stage_paths(Path(transcript_json), label)
     if not paths["translation_json"].exists():
         raise RuntimeError(
-            f"No translation found at {paths['translation_json'].name}. Translate first (python translate.py RUN/), "
+            f"No translation found at {paths['translation_json'].name}. Translate first (python scripts/translate.py RUN/), "
             "using the same --label if you gave one."
         )
     translation = json.loads(paths["translation_json"].read_text(encoding="utf-8"))

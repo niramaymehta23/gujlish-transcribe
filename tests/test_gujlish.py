@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from asr.gujlish import COMMON, GeminiEngine, Transliterator, casual, latin_token, run_gujlish
-from asr.llm import Completion
+from transcriber.english.llm import Completion
+from transcriber.speech.gujlish import COMMON, GeminiEngine, Transliterator, casual, latin_token, run_gujlish
 
 
 class FakeEngine:

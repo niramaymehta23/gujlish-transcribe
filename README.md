@@ -111,7 +111,7 @@ Then:
 
 Transcription and the Gemini steps have separate queues, so a translation never waits for a transcription. If the app stops in the middle of a run (or a hosted server restarts), it picks the work up again by itself the next time it starts.
 
-Your files are saved in the project folder: recordings in `recordings/` and results in `transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Neither folder is ever uploaded to GitHub.
+Your files are saved in the `data/` folder: recordings in `data/recordings/` and results in `data/transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Nothing in `data/` is ever uploaded to GitHub.
 
 **Fully offline:** once the model has downloaded, start the app with `HF_HUB_OFFLINE=1 python app.py` and it never contacts Hugging Face.
 
@@ -125,20 +125,20 @@ Speech recognition mishears some words, often the same ones every time: names, p
 
 Words the dictionary fixed are underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date (an orange dot); **Update English, summary & YouTube** re-translates only the lines you changed.
 
-The **Dictionary** list on the left shows what you've taught it, and **×** forgets a fix. It is stored in `dictionary.json` in the project folder (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish, the sentence it came from, its time, and a short audio clip of that stretch in `dictionary-clips/`, ready for smarter matching later.
+The **Dictionary** list on the left shows what you've taught it, and **×** forgets a fix. It is stored in `data/dictionary.json` (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish, the sentence it came from, its time, and a short audio clip of that stretch in `data/dictionary-clips/`, ready for smarter matching later.
 
 ## Use the command line
 
-Useful for batches or for comparing settings. Put your files in `recordings/` (or anywhere) and run:
+Useful for batches or for comparing settings. Put your files in `data/recordings/` (or anywhere) and run:
 
 ```bash
-python transcribe.py recordings/talk.m4a flex                  # Gujarati + English (mixed script)
-python transcribe.py recordings/talk.m4a flex --mode native     # everything in Gujarati script
-python transcribe.py recordings/talk.m4a gujlish                # comparison model
-python transcribe.py recordings/talk.m4a gujlish --plot         # plus a confidence chart
+python scripts/transcribe.py data/recordings/talk.m4a flex                  # Gujarati + English (mixed script)
+python scripts/transcribe.py data/recordings/talk.m4a flex --mode native     # everything in Gujarati script
+python scripts/transcribe.py data/recordings/talk.m4a gujlish                # comparison model
+python scripts/transcribe.py data/recordings/talk.m4a gujlish --plot         # plus a confidence chart
 ```
 
-The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.txt`, with `talk.flex.srt` (subtitles) and a `.json` that has timings. Running the same command again after an interruption resumes it; add `--reset` to start fresh.
+The transcript is saved as `data/transcripts/talk/flex-mixed/<date-time>/talk.flex.txt`, with `talk.flex.srt` (subtitles) and a `.json` that has timings. Running the same command again after an interruption resumes it; add `--reset` to start fresh.
 
 | Option | What it does |
 | --- | --- |
@@ -146,15 +146,15 @@ The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.tx
 | `--device auto` / `mps` / `cuda` / `cpu` | Where the model runs. `auto` picks the Apple GPU, then NVIDIA, then the CPU. |
 | `--chunking pause` / `fixed` | `pause` (default) cuts the audio at the speaker's pauses and skips silence; `fixed` cuts at fixed lengths. |
 | `--denoise` | Applies a light noise filter before transcribing. |
-| `--vocab FILE` | Fixes spellings you list, for example names. See `custom_words.example.json`. |
-| `--dictionary dictionary.json` | Applies the fixes you saved in the web app. |
+| `--vocab FILE` | Fixes spellings you list, for example names. See `examples/custom_words.json`. |
+| `--dictionary data/dictionary.json` | Applies the fixes you saved in the web app. |
 | `--gujlish` | Also writes the Gujlish version (`talk.flex.gujlish.txt`, `.srt`, `.json`). |
 | `--plot` | Saves a confidence chart (Gujlish only). |
 | `--translate`, `--summarize` | Also translate and summarize afterwards (next section). |
 | `--reset` | Ignore an unfinished earlier run and start again. |
 | `--output-dir PATH` | Save results in a folder you choose. |
 
-`python transcribe.py --help` lists every option. For an existing run, `python transliterate.py transcripts/talk/flex-mixed/<date-time>/` writes the Gujlish (add `--engine gemini` to have Gemini spell it instead).
+`python scripts/transcribe.py --help` lists every option. For an existing run, `python scripts/transliterate.py data/transcripts/talk/flex-mixed/<date-time>/` writes the Gujlish (add `--engine gemini` to have Gemini spell it instead).
 
 ## Translate to English and summarize (optional)
 
@@ -186,25 +186,25 @@ Fix the words first, then open the **English** or **Summary & YouTube** tab and 
 ### From the command line
 
 ```bash
-python transcribe.py recordings/talk.m4a flex --translate --summarize     # all in one go
-python translate.py transcripts/talk/flex-mixed/<date-time>/             # translate an existing run
-python summarize.py transcripts/talk/flex-mixed/<date-time>/             # then summarize it
+python scripts/transcribe.py data/recordings/talk.m4a flex --translate --summarize     # all in one go
+python scripts/translate.py data/transcripts/talk/flex-mixed/<date-time>/             # translate an existing run
+python scripts/summarize.py data/transcripts/talk/flex-mixed/<date-time>/             # then summarize it
 ```
 
 Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.flex.en.srt` (English subtitles), `talk.flex.bilingual.md` (Gujarati and English side by side) and `talk.flex.summary.md`.
 
-Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
+Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary examples/glossary.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
 
 ### YouTube title and description
 
 The **Summary & YouTube** step also writes a YouTube title (plus alternatives), a description ready to paste, chapters and tags. They sit at the top of the summary, with buttons to copy the title and the description. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
 
-Tell it about your channel with plain-text files in the project folder (kept out of Git); copy the `.example` files to start:
+Tell it about your channel with plain-text files in `data/` (kept out of Git); copy the templates from `examples/` to start:
 
 | File | What goes in it |
 | --- | --- |
-| `channel.md` | The channel, its audience, speakers, title style, and how names and terms are spelled. The translation uses it for spelling too, and changing it means the next translation starts again from the beginning. |
-| `youtube_footer.txt` | Links and standard lines added word for word to every description. |
+| `data/channel.md` | The channel, its audience, speakers, title style, and how names and terms are spelled. The translation uses it for spelling too, and changing it means the next translation starts again from the beginning. |
+| `data/youtube_footer.txt` | Links and standard lines added word for word to every description. |
 
 ### Clips and motion graphics
 
@@ -228,25 +228,24 @@ Finding clips, storyboards and Remotion videos run in Claude Code on your own co
 
 ```text
 gujlish-transcribe/
-├── app.py                      # start the web app
-├── transcribe.py               # command-line transcription
-├── translate.py                # translate a transcript to English
-├── summarize.py                # summarize the English
-├── youtube.py                  # YouTube title, description and chapters from the English
-├── studio/                     # clips and motion graphics, run from Claude Code
-├── transliterate.py            # write a transcript in Gujlish
-├── evaluate.py                 # measure accuracy against a reference transcript
-├── asr/                        # speech models, audio chunking, translation and summary code
-├── web/                        # the browser app (Flask server, page, styles, script)
-├── tests/                      # automated tests (no model download needed)
-├── docs/                       # design notes and development history
-├── custom_words.example.json   # template for --vocab
-├── glossary.example.json       # template for --glossary
-├── channel.example.md          # template for your channel profile
-├── youtube_footer.example.txt  # template for the description footer
-├── recordings/                 # your recordings (kept out of Git)
-├── transcripts/                # your results (kept out of Git)
-└── dictionary.json             # your word fixes, made in the web app (kept out of Git)
+├── app.py              # start the web app: python app.py
+├── transcriber/        # all the Python code
+│   ├── speech/         #   recognising Gujarati: models, audio chunking, guards, word fixes, Gujlish
+│   ├── english/        #   Gemini: translation, summary, YouTube title and description
+│   └── files/          #   run folders and paths, subtitles, shared text helpers
+├── web/                # the browser app (Flask server, page, styles, script)
+├── scripts/            # command-line tools: transcribe, translate, summarize, youtube, transliterate, evaluate
+├── studio/             # clips and motion graphics, run from Claude Code
+├── examples/           # templates: channel.md, youtube_footer.txt, glossary.json, custom_words.json
+├── deploy/             # Google Cloud Run setup and deploy scripts
+├── docs/               # design notes and development history
+├── tests/              # automated tests (no model download needed)
+└── data/               # everything private, kept out of Git (the hosted site keeps the same files in its bucket)
+    ├── recordings/     #   your recordings
+    ├── transcripts/    #   your results
+    ├── channel.md      #   your channel profile (copy from examples/)
+    ├── youtube_footer.txt
+    └── dictionary.json #   your word fixes, made in the web app
 ```
 
 ## For developers
@@ -260,7 +259,7 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-To measure accuracy against a reference transcript, run `python evaluate.py reference.txt transcripts/.../talk.flex.txt --normalize`, which reports word and character error rates.
+To measure accuracy against a reference transcript, run `python scripts/evaluate.py reference.txt data/transcripts/.../talk.flex.txt --normalize`, which reports word and character error rates.
 
 Design decisions, what has and hasn't been verified, and open questions are in [docs/design-notes.md](docs/design-notes.md) and [docs/process-report.md](docs/process-report.md). See also [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 

@@ -25,7 +25,7 @@ class Base(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.recordings, self.transcripts = self.root / "recordings", self.root / "transcripts"
         for name, value in (("RECORDINGS", self.recordings), ("TRANSCRIPTS", self.transcripts), ("DATA", self.root)):
-            patcher = patch(f"asr.storage.{name}", value)
+            patcher = patch(f"transcriber.files.storage.{name}", value)
             patcher.start()
             self.addCleanup(patcher.stop)
 

@@ -6,12 +6,12 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-# Kept in step with asr/asr_backends.py; duplicated so code edits don't invalidate the cached model layer.
+# Kept in step with transcriber/speech/backends.py; duplicated so code edits don't invalidate the cached model layer.
 REPOS = {
     "flex": ("bodhan-ai/indic-transcribe-flex", ["nemo/*"]),
     "gujlish": ("WhissleAI/speech-tagger_gujlish_wav2vec2_meta", []),
 }
-# Kept in step with asr/gujlish.py: IndicXlit in both directions (Gujarati → Gujlish, and Gujlish → Gujarati for the
+# Kept in step with transcriber/speech/gujlish.py: IndicXlit in both directions (Gujarati → Gujlish, and Gujlish → Gujarati for the
 # word editor's suggestions).
 XLIT = ("Singla0009/all-indic-transliteration", "23279e441f195f6a45296fcee84ac89b541254ff")
 XLIT_FOLDERS = ["indicxlit_indic_en_ct2_fp32/*", "indicxlit_ct2_fp32/*"]

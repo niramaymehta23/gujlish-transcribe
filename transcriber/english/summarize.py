@@ -15,9 +15,9 @@ import re
 from bisect import bisect_right
 from pathlib import Path
 
-from .llm import LLMError, parse_json_object
-from .storage import stage_paths
-from .textutil import escape_tags, fmt_time, parse_time, sha, write_json
+from transcriber.english.llm import LLMError, parse_json_object
+from transcriber.files.storage import stage_paths
+from transcriber.files.textutil import escape_tags, fmt_time, parse_time, sha, write_json
 
 PROMPT_VERSION = "summary-v1"
 SECTION_CHARS = 16000  # source characters per extraction call
@@ -282,7 +282,7 @@ def run_summary(
     paths = stage_paths(transcript_json, label)
     if not paths["translation_json"].exists():
         raise RuntimeError(
-            f"No translation found at {paths['translation_json'].name}. Translate first (python translate.py RUN/), "
+            f"No translation found at {paths['translation_json'].name}. Translate first (python scripts/translate.py RUN/), "
             "using the same --label if you gave one."
         )
     translation = json.loads(paths["translation_json"].read_text(encoding="utf-8"))

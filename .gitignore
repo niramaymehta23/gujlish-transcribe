@@ -22,13 +22,16 @@ dist/
 *.pem
 *.key
 .DS_Store
-recordings/*
-# The correction dictionary the web app builds from your fixes, and its audio clips.
-dictionary.json
-dictionary-clips/
-# Your channel profile and YouTube description footer (copy the .example files to start).
-channel.md
-youtube_footer.txt
+# Everything private lives in data/: recordings, transcripts, channel.md, youtube_footer.txt and the correction
+# dictionary. Only the empty folder is shared. The root entries catch files left in the old places.
+data/*
+!data/.gitkeep
+/recordings/
+/transcripts/
+/channel.md
+/youtube_footer.txt
+/dictionary.json
+/dictionary-clips/
 # The studio's talks, media and channel rules; only its tools and instructions are shared.
 studio/inbox/*
 !studio/inbox/.gitkeep
@@ -38,11 +41,6 @@ studio/rules/*
 !studio/rules/*.example.md
 studio/remotion/node_modules/
 studio/remotion/out/
-transcripts/*
-plots/*
-!recordings/.gitkeep
-!transcripts/.gitkeep
-!plots/.gitkeep
 # Model weights and local exports should never be committed accidentally.
 *.safetensors
 *.pt

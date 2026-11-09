@@ -5,11 +5,6 @@
 .pytest_cache
 .ruff_cache
 **/.DS_Store
-recordings
-transcripts
-plots
-dictionary.json
-dictionary-clips
 tests
 docs
 *.md
@@ -17,5 +12,5 @@ docs
 .env
 .env.*
 studio
-channel.md
-youtube_footer.txt
+data
+examples

@@ -15,9 +15,9 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from . import storage
-from .postprocess import EDGE_PUNCTUATION, _key
-from .textutil import write_json
+from transcriber.files import storage
+from transcriber.files.textutil import write_json
+from transcriber.speech.postprocess import EDGE_PUNCTUATION, _key
 
 MAX_EXAMPLES = 5  # recordings kept per correction as evidence; the oldest go first
 

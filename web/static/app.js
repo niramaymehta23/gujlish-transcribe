@@ -13,7 +13,7 @@ const HOSTED = document.body.dataset.hosted === '1';
 const CHUNK_BYTES = Number(document.body.dataset.chunkBytes) || 8 * 1024 * 1024;
 const MAX_UPLOAD_MB = Number(document.body.dataset.maxUploadMb) || 4096;
 const SERVER = HOSTED ? 'the server' : 'the local server';
-const EDGE = /^[.,!?;:"'()[\]{}…।॥]+|[.,!?;:"'()[\]{}…।॥]+$/g;  // asr.postprocess.EDGE_PUNCTUATION
+const EDGE = /^[.,!?;:"'()[\]{}…।॥]+|[.,!?;:"'()[\]{}…।॥]+$/g;  // transcriber.speech.postprocess.EDGE_PUNCTUATION
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // A 401 means the site's password session ended: go back to the sign-in page.
 const signedOut = response => { if (response.status === 401) { location.href = '/login'; return true; } return false; };

@@ -18,11 +18,11 @@ import json
 import re
 from pathlib import Path
 
-from .llm import LLMError, parse_json_object, strip_reasoning
-from .postprocess import drop_cut_stop
-from .storage import stage_paths
-from .subtitles import SENTENCE_END, write_srt
-from .textutil import escape_tags, fmt_time, gujarati_ratio, sha, write_json
+from transcriber.english.llm import LLMError, parse_json_object, strip_reasoning
+from transcriber.files.storage import stage_paths
+from transcriber.files.subtitles import SENTENCE_END, write_srt
+from transcriber.files.textutil import escape_tags, fmt_time, gujarati_ratio, sha, write_json
+from transcriber.speech.postprocess import drop_cut_stop
 
 PROMPT_VERSION = "flow-v2"
 PARAGRAPH_GAP_SECONDS = 1.5

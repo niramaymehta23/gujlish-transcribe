@@ -1,0 +1,2 @@
+Copy this file to data/youtube_footer.txt (kept out of Git). Its text is added word for word to the end of every
+description that the Summary & YouTube step writes: put your links, socials and standard lines here, and delete these lines.

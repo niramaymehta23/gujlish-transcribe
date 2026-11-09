@@ -27,17 +27,17 @@ from uuid import uuid4
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
-import asr.storage as storage
-from asr.dictionary import clips_dir, dictionary_path, forget, remember, save_clip
-from asr.dictionary import load as load_dictionary
-from asr.dictionary import save as save_dictionary
-from asr.edits import load_gujlish, matches, replace_words, save_transcript
-from asr.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
-from asr.llm import gemini_available
-from asr.postprocess import drop_cut_stop
-from asr.storage import ROOT, new_run, run_paths, stage_paths
-from asr.subtitles import to_srt
-from asr.textutil import fmt_time, write_json
+import transcriber.files.storage as storage
+from transcriber.english.llm import gemini_available
+from transcriber.files.storage import ROOT, new_run, run_paths, stage_paths
+from transcriber.files.subtitles import to_srt
+from transcriber.files.textutil import fmt_time, write_json
+from transcriber.speech.dictionary import clips_dir, dictionary_path, forget, remember, save_clip
+from transcriber.speech.dictionary import load as load_dictionary
+from transcriber.speech.dictionary import save as save_dictionary
+from transcriber.speech.edits import load_gujlish, matches, replace_words, save_transcript
+from transcriber.speech.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
+from transcriber.speech.postprocess import drop_cut_stop
 from web.documents import markdown_docx, transcript_docx
 from web.recordings import FINGERPRINT, fingerprint, fingerprints
 from web.recordings import find as find_recording
@@ -63,14 +63,14 @@ class Stage:
     script, output file, and progress event ("translating")."""
 
     script: str
-    output: str  # key in asr.storage.stage_paths
+    output: str  # key in transcriber.files.storage.stage_paths
     verb: str
 
 
 STAGES = {
-    "gujlish": Stage("transliterate.py", "gujlish_json", "Writing Gujlish"),
-    "translation": Stage("translate.py", "translation_txt", "Translating"),
-    "summary": Stage("summarize.py", "summary_md", "Writing the summary & YouTube details"),
+    "gujlish": Stage("scripts/transliterate.py", "gujlish_json", "Writing Gujlish"),
+    "translation": Stage("scripts/translate.py", "translation_txt", "Translating"),
+    "summary": Stage("scripts/summarize.py", "summary_md", "Writing the summary & YouTube details"),
 }
 PROGRESS_EVENTS = {"transliterating", "translating", "summarizing"}
 
@@ -417,7 +417,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 return  # deleted, paused or queued again since
             job.update(status="loading", message="Loading the model. The first run may download model weights.")
             run_dir = Path(job["run_dir"])
-            command = [sys.executable, str(ROOT / "transcribe.py"), job["source"], job["model"]]
+            command = [sys.executable, str(ROOT / "scripts" / "transcribe.py"), job["source"], job["model"]]
             command += ["--mode", job.get("mode") or "mixed", "--output-dir", str(run_dir)]
             command += ["--dictionary", str(dictionary_path()), "--progress-json"]
 
@@ -858,7 +858,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             view["translation_text"] = paths["translation_txt"].read_text(encoding="utf-8")
             if paths["translation_json"].exists():
                 english = json.loads(paths["translation_json"].read_text(encoding="utf-8")).get("segments", [])
-                # The translator reads each chunk without its cut full stop (asr.postprocess.drop_cut_stop).
+                # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
                 current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
                 view["english_stale"] = [s.get("source") for s in english] != current
         if state["summary"]["status"] == "complete":

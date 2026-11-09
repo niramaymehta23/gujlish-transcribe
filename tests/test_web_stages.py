@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from docx import Document
 
-from evaluate import error_rate, normalize
+from scripts.evaluate import error_rate, normalize
 from tests.helpers import DeferredExecutor
 from web.server import create_app, markdown_docx
 
@@ -37,7 +37,7 @@ class TestStages(unittest.TestCase):
             encoding="utf-8",
         )
         self.executor = DeferredExecutor()
-        patcher = patch("asr.storage.TRANSCRIPTS", self.root / "transcripts")
+        patcher = patch("transcriber.files.storage.TRANSCRIPTS", self.root / "transcripts")
         patcher.start()
         self.addCleanup(patcher.stop)
         # Snapshot os.environ so any API keys a test sets are rolled back afterwards.

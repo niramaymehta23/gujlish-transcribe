@@ -12,10 +12,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .llm import LLMError
-from .publish_common import call_json, line_index, list_of, load_translation, numbered_lines, text_of
-from .storage import stage_paths
-from .textutil import fmt_time, write_json
+from transcriber.english.llm import LLMError
+from transcriber.english.publish_common import call_json, line_index, list_of, load_translation, numbered_lines, text_of
+from transcriber.files.storage import stage_paths
+from transcriber.files.textutil import fmt_time, write_json
 
 PROMPT_VERSION = "youtube-v1"
 MAX_INPUT_CHARS = 400_000  # about six hours of speech; well inside Gemini's context

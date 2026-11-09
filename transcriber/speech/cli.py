@@ -7,8 +7,11 @@ import argparse
 import json
 from pathlib import Path
 
-from .asr_backends import choose_device, load_backend
-from .audio_stream import (
+from transcriber.english.enrich import STAGE_ERRORS, add_llm_arguments, run_stages
+from transcriber.files.storage import TRANSCRIPTS, new_run, run_label, run_paths
+from transcriber.files.subtitles import write_srt
+from transcriber.files.textutil import write_json
+from transcriber.speech.audio_stream import (
     CHUNK_SECONDS,
     GUJLISH_CHUNK_SECONDS,
     OVERLAP_SECONDS,
@@ -16,17 +19,20 @@ from .audio_stream import (
     load_detector,
     require_ffmpeg,
 )
-from .dictionary import apply_corrections
-from .dictionary import load as load_dictionary
-from .edits import transcript_text
-from .enrich import STAGE_ERRORS, add_llm_arguments, run_stages
-from .guards import check_segment
-from .gujlish import Transliterator, run_gujlish
-from .postprocess import confidence_plot, correct_segments, drop_cut_stops, load_vocabulary, merge_segments
-from .segmenter import split_chunk
-from .storage import TRANSCRIPTS, new_run, run_label, run_paths
-from .subtitles import write_srt
-from .textutil import write_json
+from transcriber.speech.backends import choose_device, load_backend
+from transcriber.speech.dictionary import apply_corrections
+from transcriber.speech.dictionary import load as load_dictionary
+from transcriber.speech.edits import transcript_text
+from transcriber.speech.guards import check_segment
+from transcriber.speech.gujlish import Transliterator, run_gujlish
+from transcriber.speech.postprocess import (
+    confidence_plot,
+    correct_segments,
+    drop_cut_stops,
+    load_vocabulary,
+    merge_segments,
+)
+from transcriber.speech.segmenter import split_chunk
 
 CHECKPOINT_VERSION = 3
 RETRY_FLAGS = {"repetition", "too_dense"}

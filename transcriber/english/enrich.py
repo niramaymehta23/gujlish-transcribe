@@ -6,11 +6,11 @@ import argparse
 import json
 from pathlib import Path
 
-from .llm import DEFAULT_GEMINI_MODEL, GeminiLLM, LLMError
-from .publish_common import read_text_file
-from .summarize import run_summary
-from .translate import STYLES, load_glossary, run_translation
-from .youtube import run_youtube
+from transcriber.english.llm import DEFAULT_GEMINI_MODEL, GeminiLLM, LLMError
+from transcriber.english.publish_common import read_text_file
+from transcriber.english.summarize import run_summary
+from transcriber.english.translate import STYLES, load_glossary, run_translation
+from transcriber.english.youtube import run_youtube
 
 STAGE_ERRORS = (ImportError, OSError, RuntimeError, ValueError, LLMError, json.JSONDecodeError)
 
@@ -37,8 +37,8 @@ def add_llm_arguments(parser: argparse.ArgumentParser, *, translation: bool = Tr
     group.add_argument(
         "--channel",
         type=Path,
-        help="Channel profile: how names and terms are spelled, the audience and title style (default: channel.md "
-        "in the project folder, if there). See channel.example.md",
+        help="Channel profile: how names and terms are spelled, the audience and title style (default: data/channel.md, "
+        "if there). See examples/channel.md",
     )
     group.add_argument("--label", help="Suffix for output files, so runs with different models do not overwrite")
 
@@ -179,8 +179,8 @@ def _channel_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--channel",
         type=Path,
-        help="Text file describing the channel, its audience and style (default: channel.md in the project folder, "
-        "if there). See channel.example.md",
+        help="Text file describing the channel, its audience and style (default: data/channel.md, if there). "
+        "See examples/channel.md",
     )
     parser.add_argument("--style-note", default="", help="Extra context for this recording")
     parser.add_argument("--llm-model", help=f"Gemini model to use (default {DEFAULT_GEMINI_MODEL})")
@@ -199,8 +199,8 @@ def youtube_main() -> None:
     parser.add_argument(
         "--footer",
         type=Path,
-        help="Text added word for word to the end of every description, e.g. links (default: youtube_footer.txt "
-        "in the project folder, if there)",
+        help="Text added word for word to the end of every description, e.g. links (default: data/youtube_footer.txt, "
+        "if there). See examples/youtube_footer.txt",
     )
     args = parser.parse_args()
     try:

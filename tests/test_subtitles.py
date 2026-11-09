@@ -3,7 +3,7 @@
 import re
 import unittest
 
-from asr.subtitles import MAX_CUE_CHARS, MAX_LINE_CHARS, segment_cues, srt_time, to_srt
+from transcriber.files.subtitles import MAX_CUE_CHARS, MAX_LINE_CHARS, segment_cues, srt_time, to_srt
 
 
 class TestSubtitles(unittest.TestCase):
