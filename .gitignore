@@ -28,6 +28,7 @@ data/*
 !data/.gitkeep
 /recordings/
 /transcripts/
+/plots/
 /channel.md
 /youtube_footer.txt
 /dictionary.json

@@ -11,7 +11,7 @@ Flex is a 1.2B model that decodes 30 s windows. Cutting audio every 27.5 s regar
 3. Edges are trimmed with a 0.4 s pad (0.2 s clipped short word onsets in testing), and chunks with under 0.3 s of speech are skipped, which avoids the hallucinated text recognizers tend to produce on silence.
 4. Output guards flag repeated phrases and implausible density (over 35 non-space characters per second) and re-decode that chunk in two halves. They never edit text, because chanting and deliberate repetition are legitimate.
 
-Measured: on real English speech, with a whole-file Silero pass as the reference, chunk boundaries inside speech fell from 8 of 8 (fixed cuts) to 1 of 8, and no speech frames were lost. Not measured: WER on Gujarati. Flex could not be run in that test environment, so the benefit for transcription accuracy follows from the mechanism, not from a score. Guard thresholds are heuristics. Use `--chunking fixed` to compare on your own recordings with `evaluate.py --normalize`.
+Measured: on real English speech, with a whole-file Silero pass as the reference, chunk boundaries inside speech fell from 8 of 8 (fixed cuts) to 1 of 8, and no speech frames were lost. Not measured: WER on Gujarati. Flex could not be run in that test environment, so the benefit for transcription accuracy follows from the mechanism, not from a score. Guard thresholds are heuristics. Use `--chunking fixed` to compare on your own recordings with `scripts/evaluate.py --normalize`.
 
 Silero VAD sets PyTorch to one thread on import, which would slow CPU inference; the code restores the previous thread count.
 

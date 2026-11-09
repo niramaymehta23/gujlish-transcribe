@@ -113,6 +113,16 @@ Transcription and the Gemini steps have separate queues, so a translation never 
 
 Your files are saved in the `data/` folder: recordings in `data/recordings/` and results in `data/transcripts/<recording name>/<model>/<date-time>/`, including SRT subtitle files for the transcript and, once translated, the English. Nothing in `data/` is ever uploaded to GitHub.
 
+**Upgrading from an older copy?** Earlier versions kept these files in the top folder. Move `recordings/`, `transcripts/`, `plots/`, `channel.md`, `youtube_footer.txt`, `dictionary.json` and `dictionary-clips/` (whichever you have) into `data/`, or the app won't see your earlier runs, word fixes or channel profile:
+
+```bash
+for d in recordings transcripts plots dictionary-clips; do [ -d "$d" ] && mkdir -p "data/$d" && find "$d" -mindepth 1 -maxdepth 1 -exec mv -n {} "data/$d"/ \; ; rmdir "$d" 2>/dev/null; done
+for f in channel.md youtube_footer.txt dictionary.json; do [ -e "$f" ] && mv -n "$f" data/; done
+ls recordings transcripts plots dictionary-clips channel.md youtube_footer.txt dictionary.json 2>/dev/null   # anything listed already exists in data/: compare and move it by hand
+```
+
+Nothing is overwritten: a file or folder that already exists in `data/` is left where it was.
+
 **Fully offline:** once the model has downloaded, start the app with `HF_HUB_OFFLINE=1 python app.py` and it never contacts Hugging Face.
 
 ## Fix words and build your dictionary
