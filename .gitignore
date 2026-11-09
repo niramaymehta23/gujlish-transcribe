@@ -26,10 +26,18 @@ recordings/*
 # The correction dictionary the web app builds from your fixes, and its audio clips.
 dictionary.json
 dictionary-clips/
-# Your channel profile, YouTube description footer and clip rules (copy the .example files to start).
+# Your channel profile and YouTube description footer (copy the .example files to start).
 channel.md
 youtube_footer.txt
-clip_rules.md
+# The studio's talks, media and channel rules; only its tools and instructions are shared.
+studio/inbox/*
+!studio/inbox/.gitkeep
+studio/talks/*
+!studio/talks/.gitkeep
+studio/rules/*
+!studio/rules/*.example.md
+studio/remotion/node_modules/
+studio/remotion/out/
 transcripts/*
 plots/*
 !recordings/.gitkeep

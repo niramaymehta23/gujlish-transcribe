@@ -1,4 +1,4 @@
-"""Shared pieces for the YouTube stages (title/description and short clips), which both read the English translation.
+"""Shared pieces for the YouTube stage, which reads the English translation.
 
 The model is shown the translation as numbered lines, one per recognized chunk, with each chunk's real start and end
 time. It answers with line numbers, never with times, so every time in the output is computed from the recording's

@@ -184,6 +184,23 @@ def render_markdown(meta: dict, description: str, *, name: str, made_by: str) ->
     return "\n".join(lines)
 
 
+def add_to_summary(summary_md: Path, meta: dict, description: str) -> None:
+    """Put the title and description at the top of the summary document, before its first section."""
+    lines = ["## YouTube title", "", meta["titles"][0], ""]
+    if len(meta["titles"]) > 1:
+        lines += ["Other options:", ""] + [f"- {title}" for title in meta["titles"][1:]] + [""]
+    lines += ["## YouTube description", "", description, ""]
+    if meta["tags"]:
+        lines += ["## YouTube tags", "", ", ".join(meta["tags"]), ""]
+    section = "\n".join(lines) + "\n"
+    text = summary_md.read_text(encoding="utf-8")
+    at = text.find("\n## ")
+    if at < 0:
+        summary_md.write_text(f"{text.rstrip()}\n\n{section}", encoding="utf-8")
+    else:
+        summary_md.write_text(f"{text[: at + 1]}{section}{text[at + 1 :]}", encoding="utf-8")
+
+
 def run_youtube(
     transcript_json: Path,
     llm,
@@ -213,6 +230,8 @@ def run_youtube(
     meta["notes"] += notes
     name = translation.get("source") or transcript_json.stem
     paths["youtube_md"].write_text(render_markdown(meta, description, name=name, made_by=llm.label), encoding="utf-8")
+    if paths["summary_md"].exists():
+        add_to_summary(paths["summary_md"], meta, description)
     write_json(
         paths["youtube_json"],
         {

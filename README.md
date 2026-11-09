@@ -101,7 +101,7 @@ Then:
 3. **Click Transcribe.** The recording appears under **Recordings** with its progress, and you can open other recordings while it works. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
 4. **Fix any misheard words** in the **Gujarati** or **Gujlish** tab (see [below](#fix-words-and-build-your-dictionary)).
 5. **Read, copy or download** each version as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
-6. **Optional:** once the words are right, open **English** or **Summary** and click **Translate & summarize** (see [below](#translate-to-english-and-summarize-optional)).
+6. **Optional:** once the words are right, open **English** or **Summary & YouTube** and click **Translate & write summary** (see [below](#translate-to-english-and-summarize-optional)).
 
 **Recordings** on the left lists every run and what it is doing, even after restarting the app. While a recording is being transcribed you can:
 
@@ -123,7 +123,7 @@ Speech recognition mishears some words, often the same ones every time: names, p
 2. **Type the right word** in either box. Typing Gujlish (English letters) fills in the Gujarati and offers spellings to tap, so you don't need a Gujarati keyboard. Typing Gujarati fills in the Gujlish. If you only respell the Gujlish, the Gujarati is kept and just the spelling is saved.
 3. **Replace.** *Also fix the other N places* changes every match in this recording. *Remember for future recordings* saves the fix to your dictionary (both are on by default).
 
-Words the dictionary fixed are underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date (an orange dot); **Update English & summary** re-translates only the lines you changed.
+Words the dictionary fixed are underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date (an orange dot); **Update English, summary & YouTube** re-translates only the lines you changed.
 
 The **Dictionary** list on the left shows what you've taught it, and **×** forgets a fix. It is stored in `dictionary.json` in the project folder (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish, the sentence it came from, its time, and a short audio clip of that stretch in `dictionary-clips/`, ready for smarter matching later.
 
@@ -158,7 +158,7 @@ The transcript is saved as `transcripts/talk/flex-mixed/<date-time>/talk.flex.tx
 
 ## Translate to English and summarize (optional)
 
-After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. This uses **Google's Gemini** and needs your own Gemini API key. Without a key, transcription still works; only the English and Summary tabs stay off.
+After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. This uses **Google's Gemini** and needs your own Gemini API key. Without a key, transcription still works; only the English and Summary & YouTube tabs stay off.
 
 **Privacy and cost:** only the transcript *text* is sent to Google, never the audio. Gemini charges per use; at Google's published prices a long recording usually costs well under a dollar. Check Google's data-use terms for your key's tier before sending private recordings.
 
@@ -181,7 +181,7 @@ This lasts until you close that terminal. To avoid repeating it, add `export GEM
 
 ### 3. Translate and summarize
 
-Fix the words first, then open the **English** or **Summary** tab and click **Translate & summarize**. The corrected Gujarati (not the Gujlish, which is less precise) is translated, then summarized. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
+Fix the words first, then open the **English** or **Summary & YouTube** tab and click **Translate & write summary**. The corrected Gujarati (not the Gujlish, which is less precise) is translated, then summarized, with a YouTube title and description. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
 
 ### From the command line
 
@@ -195,27 +195,20 @@ Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.fl
 
 Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary glossary.example.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
 
-### YouTube title, description and short clips
+### YouTube title and description
 
-Once the English is done, two more commands use it (same Gemini key):
+The **Summary & YouTube** step also writes a YouTube title (plus alternatives), a description ready to paste, chapters and tags. They sit at the top of the summary, with buttons to copy the title and the description. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
 
-```bash
-python youtube.py transcripts/talk/flex-mixed/<date-time>/   # title options, description, chapters, tags
-python clips.py transcripts/talk/flex-mixed/<date-time>/     # clips for YouTube Shorts and Instagram Reels
-```
+Tell it about your channel with plain-text files in the project folder (kept out of Git); copy the `.example` files to start:
 
-- **`youtube.py`** writes `talk.flex.youtube.md` with a title (plus alternatives), a description ready to paste, chapters and tags. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
-- **`clips.py`** writes `talk.flex.clips.md`: the best clips first, each with its start and end time, length, type, score, why it fits, the English it contains and an `ffmpeg` command to cut it. Every clip is **0:30 to 3:00 long**; the program checks this from the real timings and lists anything outside the limits (or below `--min-score`, default 6) under "Not used" with the reason. Clips start and end on the transcript's chunk boundaries, which fall on the speaker's pauses.
+| File | What goes in it |
+| --- | --- |
+| `channel.md` | The channel, its audience, speakers, title style, and how names and terms are spelled. The translation uses it for spelling too, and changing it means the next translation starts again from the beginning. |
+| `youtube_footer.txt` | Links and standard lines added word for word to every description. |
 
-Tell them about your channel with plain-text files in the project folder (kept out of Git); copy the `.example` files to start:
+### Clips and motion graphics
 
-| File | Used by | What goes in it |
-| --- | --- | --- |
-| `clip_rules.md` | `clips.py` | Your clip types and the rules a clip must meet. Without it, general rules for short clips are used. |
-| `channel.md` | both | The channel, its audience, speakers and title style. |
-| `youtube_footer.txt` | `youtube.py` | Links and standard lines added word for word to every description. |
-
-Or pass them with `--rules`, `--channel` and `--footer`. Other options: `--style-note`, `--llm-model`, `--max-clips`, `--min-score`, and `--label` if the translation was made with one.
+Finding clips, storyboards and Remotion videos run in Claude Code on your own computer, not in this app. See [studio/README.md](studio/README.md).
 
 ## Troubleshooting
 
@@ -240,7 +233,7 @@ gujlish-transcribe/
 ├── translate.py                # translate a transcript to English
 ├── summarize.py                # summarize the English
 ├── youtube.py                  # YouTube title, description and chapters from the English
-├── clips.py                    # find 0:30–3:00 clips for Shorts and Reels
+├── studio/                     # clips and motion graphics, run from Claude Code
 ├── transliterate.py            # write a transcript in Gujlish
 ├── evaluate.py                 # measure accuracy against a reference transcript
 ├── asr/                        # speech models, audio chunking, translation and summary code
@@ -249,7 +242,6 @@ gujlish-transcribe/
 ├── docs/                       # design notes and development history
 ├── custom_words.example.json   # template for --vocab
 ├── glossary.example.json       # template for --glossary
-├── clip_rules.example.md       # template for your clip rules (clips.py)
 ├── channel.example.md          # template for your channel profile
 ├── youtube_footer.example.txt  # template for the description footer
 ├── recordings/                 # your recordings (kept out of Git)

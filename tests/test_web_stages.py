@@ -121,6 +121,19 @@ class TestStages(unittest.TestCase):
         with self.client.get(f"/api/jobs/{self.job_id}/download/summary-md") as response:
             self.assertEqual(response.status_code, 200)
 
+    def test_youtube_details_reach_the_page_and_an_older_summary_asks_for_them(self):
+        (self.run_dir / "talk.flex.en.txt").write_text("Today's talk", encoding="utf-8")
+        (self.run_dir / "talk.flex.summary.md").write_text("# Title\n", encoding="utf-8")
+        status = self.client.get(f"/api/jobs/{self.job_id}").json
+        self.assertTrue(status["youtube_missing"])
+        self.assertTrue(status["summary_stale"])
+        self.assertNotIn("youtube", status)
+        details = {"kind": "youtube", "title": "Who cures the soul?", "description": "About it", "tags": ["a"]}
+        (self.run_dir / "talk.flex.youtube.json").write_text(json.dumps(details), encoding="utf-8")
+        status = self.client.get(f"/api/jobs/{self.job_id}").json
+        self.assertFalse(status["youtube_missing"])
+        self.assertEqual(status["youtube"], {"title": "Who cures the soul?", "description": "About it"})
+
     def test_srt_downloads_for_transcript_and_translation(self):
         with self.client.get(f"/api/jobs/{self.job_id}/download/srt") as response:
             self.assertEqual(response.status_code, 200)

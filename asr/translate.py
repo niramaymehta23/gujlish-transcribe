@@ -2,7 +2,8 @@
 
 Dedicated MT models (IndicTrans2, Sarvam-Translate) take one instruction and have no tone control, so tone comes
 from an instruction-following LLM that is given: a register brief, the segments around the passage being translated,
-the English already produced (for consistent names and terms), and an optional glossary.
+the English already produced (for consistent names and terms), the channel profile's spellings, and an optional
+glossary.
 
 Recognized chunks are cut at pauses, often mid-sentence, so they are translated a few at a time: the model reads the
 passage as a whole, writes it as flowing English, then hands each chunk its share so the English subtitles keep
@@ -95,11 +96,23 @@ def load_glossary(path: Path | None) -> dict[str, str]:
     return terms
 
 
-def system_prompt(tone: str, style_note: str = "") -> str:
+CHANNEL_NOTE = """
+
+The channel profile below is how this channel spells names, honorifics and terms. Use it only for spelling. \
+Translate what the speaker says: keep each name or title in the form they say it ("Swamiji" stays "Swamiji", \
+"Guruhari" stays "Guruhari"), and never expand it into a fuller name, add one, or change who is meant.
+
+<channel_profile>
+{profile}
+</channel_profile>"""
+
+
+def system_prompt(tone: str, style_note: str = "", channel: str = "") -> str:
     if tone not in STYLES:
         raise ValueError(f"Unknown tone {tone!r}; choose one of {', '.join(STYLES)}")
     style = STYLES[tone] + (f"\n- Context from the user: {style_note.strip()}" if style_note.strip() else "")
-    return SYSTEM.format(style=style)
+    note = CHANNEL_NOTE.format(profile=escape_tags(channel.strip())) if channel.strip() else ""
+    return SYSTEM.format(style=style) + note
 
 
 def _segment(index: int, unit: dict) -> str:
@@ -272,15 +285,23 @@ def _settings(meta: dict) -> dict:
     return {key: value for key, value in meta.items() if key != "source"}
 
 
-def _only_transcript_changed(partial: Path, meta: dict) -> bool:
-    """An interrupted translation whose transcript has since been edited is discarded rather than refused: the
-    segments that did not change are reused from the last finished translation instead."""
+# What may change under an interrupted translation without refusing to go on: the transcript (a word fix) and the
+# channel profile. Both happen in the web app, which has no --reset.
+RESTART_QUIETLY = {"source", "channel"}
+
+
+def _restarts_quietly(partial: Path, meta: dict) -> bool:
+    """An interrupted translation whose transcript or channel profile has since changed is discarded rather than
+    refused. After a word fix, the segments that did not change are reused from the last finished translation."""
     try:
         with partial.open(encoding="utf-8") as handle:
             saved = json.loads(handle.readline()).get("meta")
     except (OSError, ValueError, AttributeError):
         return False
-    return isinstance(saved, dict) and saved.get("source") != meta["source"] and _settings(saved) == _settings(meta)
+    if not isinstance(saved, dict):
+        return False
+    changed = {key for key in saved.keys() | meta.keys() if saved.get(key) != meta.get(key)}
+    return bool(changed) and changed <= RESTART_QUIETLY
 
 
 def _unchanged(previous: Path, units: list[dict], meta: dict):
@@ -305,12 +326,14 @@ def run_translation(
     tone: str = "spoken",
     glossary: dict[str, str] | None = None,
     style_note: str = "",
+    channel: str = "",
     limit: int | None = None,
     label: str | None = None,
     reset: bool = False,
     progress=None,
 ) -> dict[str, Path]:
-    """Translate a finished transcript. Returns the output paths (translation_txt/json, bilingual)."""
+    """Translate a finished transcript. Returns the output paths (translation_txt/json, bilingual). `channel` is the
+    channel profile, used for spelling names and terms; changing it means the next run translates everything."""
     transcript_json = Path(transcript_json)
     data = json.loads(transcript_json.read_text(encoding="utf-8"))
     units = _units(data)
@@ -320,7 +343,7 @@ def run_translation(
         units = units[: max(1, limit)]
         label = label or "sample"
     glossary = glossary or {}
-    system = system_prompt(tone, style_note)
+    system = system_prompt(tone, style_note, channel)
     llm.prepare()
     paths = stage_paths(transcript_json, label)
     meta = {
@@ -332,11 +355,13 @@ def run_translation(
         "context": {"before": CONTEXT_SEGMENTS, "after": FOLLOWING_SEGMENTS, "batch": BATCH_SEGMENTS},
         "source": sha([unit["text"] for unit in units]),
     }
+    if channel.strip():  # only when there is one, so translations made without a profile are still reused
+        meta["channel"] = sha(channel.strip())
 
     translations: list[str | None] = [None] * len(units)
     flags: list[list[str]] = [[] for _ in units]
     partial = paths["translation_partial"]
-    if reset or _only_transcript_changed(partial, meta):
+    if reset or _restarts_quietly(partial, meta):
         partial.unlink(missing_ok=True)
     if partial.exists():
         lines = partial.read_text(encoding="utf-8").splitlines()

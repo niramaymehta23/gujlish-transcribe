@@ -62,9 +62,9 @@
             <button type="button" role="tab" class="tab" id="tab-transcript" aria-selected="true">Gujarati</button>
             <button type="button" role="tab" class="tab" id="tab-gujlish" aria-selected="false">Gujlish</button>
             <button type="button" role="tab" class="tab" id="tab-translation" aria-selected="false">English</button>
-            <button type="button" role="tab" class="tab" id="tab-summary" aria-selected="false">Summary</button>
+            <button type="button" role="tab" class="tab" id="tab-summary" aria-selected="false">Summary &amp; YouTube</button>
           </div>
-          <div class="export-actions"><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a><a id="srt-download" class="secondary" href="#">↓ SRT</a></div>
+          <div class="export-actions"><button id="copy-title" class="secondary" type="button" hidden>Copy YouTube title</button><button id="copy-description" class="secondary" type="button" hidden>Copy YouTube description</button><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a><a id="srt-download" class="secondary" href="#">↓ SRT</a></div>
         </div>
         <div id="stage-box" class="stage-box" hidden>
           <div class="stage-row">
@@ -72,7 +72,7 @@
             <div class="stage-controls">
               <button id="stage-alt" class="secondary" type="button" hidden>Redo with Gemini</button>
               <button id="stage-stop" class="secondary" type="button" hidden>Stop</button>
-              <button id="stage-button" class="primary" type="button">Translate & summarize</button>
+              <button id="stage-button" class="primary" type="button">Translate &amp; write summary</button>
             </div>
           </div>
           <div id="stage-track" class="progress-track" hidden><div id="stage-fill" class="progress-fill"></div></div>
@@ -86,7 +86,7 @@
           <div id="translation" class="transcript" role="tabpanel" tabindex="0" hidden></div>
           <div id="summary" class="transcript summary" role="tabpanel" tabindex="0" hidden></div>
         </div>
-        <p class="result-note">Review names and technical terms before sharing. The English and the summary are machine-generated.</p>
+        <p class="result-note">Review names and technical terms before sharing. The English, summary and YouTube details are machine-generated.</p>
       </div>
     </section>
   </main>
