@@ -9,7 +9,7 @@ The thresholds are conservative heuristics, not measured values for any particul
 
 from __future__ import annotations
 
-from .postprocess import _key
+from transcriber.speech.postprocess import _key
 
 MAX_CHARS_PER_SECOND = 35.0  # non-space characters per second of audio; above this is almost certainly a loop
 MIN_CHARS_PER_SECOND = 1.0  # below this, with a few seconds of speech, words were probably dropped

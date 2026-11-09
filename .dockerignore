@@ -1,15 +1,11 @@
 .git
 .github
+.claude
 .venv
 **/__pycache__
 .pytest_cache
 .ruff_cache
 **/.DS_Store
-recordings
-transcripts
-plots
-dictionary.json
-dictionary-clips
 tests
 docs
 *.md
@@ -17,5 +13,13 @@ docs
 .env
 .env.*
 studio
+data
+examples
+# Private files an older copy of the project kept at the top level, before they moved into data/.
+recordings
+transcripts
+plots
 channel.md
 youtube_footer.txt
+dictionary.json
+dictionary-clips

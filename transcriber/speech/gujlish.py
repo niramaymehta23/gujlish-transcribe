@@ -17,9 +17,9 @@ import unicodedata
 from pathlib import Path
 from threading import Lock
 
-from .storage import stage_paths
-from .subtitles import write_srt
-from .textutil import write_json
+from transcriber.files.storage import stage_paths
+from transcriber.files.subtitles import write_srt
+from transcriber.files.textutil import write_json
 
 XLIT_REPO = "Singla0009/all-indic-transliteration"
 XLIT_REVISION = "23279e441f195f6a45296fcee84ac89b541254ff"  # weights only (no code); pinned so spellings stay stable
@@ -132,12 +132,12 @@ class GeminiEngine:
     name = "gemini"
 
     def __init__(self, llm=None):
-        from .llm import GeminiLLM
+        from transcriber.english.llm import GeminiLLM
 
         self.llm = llm or GeminiLLM()
 
     def latin(self, words: list[str]) -> dict[str, str]:
-        from .llm import parse_json_object
+        from transcriber.english.llm import parse_json_object
 
         found = {}
         for start in range(0, len(words), GEMINI_BATCH_WORDS):
@@ -169,7 +169,7 @@ def choose_engine(name: str = "auto"):
         return GeminiEngine()
     if name == "indicxlit" or xlit_installed():
         return XlitEngine()
-    from .llm import gemini_available
+    from transcriber.english.llm import gemini_available
 
     if gemini_available():
         return GeminiEngine()
@@ -252,8 +252,8 @@ def run_gujlish(transcript_json: Path, transliterator: Transliterator, progress=
 
 
 def main() -> None:
-    from .dictionary import load
-    from .enrich import STAGE_ERRORS, resolve_transcript
+    from transcriber.english.enrich import STAGE_ERRORS, resolve_transcript
+    from transcriber.speech.dictionary import load
 
     parser = argparse.ArgumentParser(description="Write a finished transcript in Gujlish (Gujarati in Latin letters)")
     parser.add_argument(

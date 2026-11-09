@@ -6,7 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
-from asr.llm import GeminiLLM, LLMError, parse_json_object, strip_reasoning
+from transcriber.english.llm import GeminiLLM, LLMError, parse_json_object, strip_reasoning
 
 
 class FakeServer:

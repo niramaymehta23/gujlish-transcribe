@@ -2,8 +2,16 @@
 
 import unittest
 
-from asr.dictionary import MAX_EXAMPLES, apply_corrections, forget, remember, shift_fixes, split_edges, with_edges
-from asr.edits import matches, replace_words, transcript_text
+from transcriber.speech.dictionary import (
+    MAX_EXAMPLES,
+    apply_corrections,
+    forget,
+    remember,
+    shift_fixes,
+    split_edges,
+    with_edges,
+)
+from transcriber.speech.edits import matches, replace_words, transcript_text
 
 
 def rule(heard, correct, id="r1"):

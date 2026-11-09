@@ -35,7 +35,7 @@ class HostedBase(unittest.TestCase):
             check=True,
         )
         for name, value in (("RECORDINGS", self.root / "recordings"), ("TRANSCRIPTS", self.root / "transcripts")):
-            patcher = patch(f"asr.storage.{name}", value)
+            patcher = patch(f"transcriber.files.storage.{name}", value)
             patcher.start()
             self.addCleanup(patcher.stop)
         uploads = patch("web.server.tempfile.gettempdir", return_value=str(self.root / "tmp"))

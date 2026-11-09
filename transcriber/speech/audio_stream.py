@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .segmenter import (
+from transcriber.speech.segmenter import (
     FRAME,
     SAMPLE_RATE,
     SPEECH_THRESHOLD,

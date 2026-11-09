@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from asr.llm import Completion
-from asr.publish_common import line_index, numbered_lines
-from asr.youtube import add_to_summary, full_description, run_youtube
-from asr.youtube import finalize as finalize_youtube
+from transcriber.english.llm import Completion
+from transcriber.english.publish_common import line_index, numbered_lines
+from transcriber.english.youtube import add_to_summary, full_description, run_youtube
+from transcriber.english.youtube import finalize as finalize_youtube
 
 
 class FakeLLM:

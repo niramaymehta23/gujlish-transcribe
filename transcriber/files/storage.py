@@ -4,9 +4,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-# Recordings and outputs live under the project by default; a hosted deployment points this at mounted storage.
-DATA = Path(os.environ.get("GUJLISH_DATA_DIR") or ROOT)
+ROOT = Path(__file__).resolve().parents[2]
+# Everything private (recordings, outputs, channel.md, the correction dictionary) lives in data/ by default; a hosted
+# deployment points this at its mounted storage bucket, which holds the same files.
+DATA = Path(os.environ.get("GUJLISH_DATA_DIR") or ROOT / "data")
 RECORDINGS = DATA / "recordings"
 TRANSCRIPTS = DATA / "transcripts"
 PLOTS = DATA / "plots"

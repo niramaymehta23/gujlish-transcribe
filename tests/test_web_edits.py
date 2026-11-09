@@ -28,7 +28,7 @@ class TestEdits(unittest.TestCase):
         (self.run_dir / "talk.flex.gujlish.json").write_text(json.dumps(gujlish), encoding="utf-8")
         (self.run_dir / "talk.flex.gujlish.txt").write_text("nirmay aavyo, nirmay! ha nirmay\n", encoding="utf-8")
         for name, value in (("TRANSCRIPTS", root / "transcripts"), ("DATA", root), ("RECORDINGS", root / "recordings")):
-            patcher = patch(f"asr.storage.{name}", value)
+            patcher = patch(f"transcriber.files.storage.{name}", value)
             patcher.start()
             self.addCleanup(patcher.stop)
         no_engine = patch("web.server.xlit_installed", return_value=False)  # suggestions from known words only

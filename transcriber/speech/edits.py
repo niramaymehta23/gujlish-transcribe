@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .dictionary import shift_fixes, with_edges
-from .gujlish import gujarati_words, latin_token
-from .postprocess import _key
-from .subtitles import write_srt
-from .textutil import write_json
+from transcriber.files.subtitles import write_srt
+from transcriber.files.textutil import write_json
+from transcriber.speech.dictionary import shift_fixes, with_edges
+from transcriber.speech.gujlish import gujarati_words, latin_token
+from transcriber.speech.postprocess import _key
 
 
 def transcript_text(segments: list[dict]) -> str:

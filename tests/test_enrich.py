@@ -8,11 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from asr.enrich import run_stages, summary_llm_for
-from asr.llm import Completion, LLMError
-from asr.summarize import build_sections, finalize, quote_found, render_markdown, run_summary
-from asr.textutil import escape_tags, fmt_time, gujarati_ratio, parse_time
-from asr.translate import (
+from transcriber.english.enrich import run_stages, summary_llm_for
+from transcriber.english.llm import Completion, LLMError
+from transcriber.english.summarize import build_sections, finalize, quote_found, render_markdown, run_summary
+from transcriber.english.translate import (
     _units,
     assemble_text,
     batches,
@@ -23,6 +22,7 @@ from asr.translate import (
     run_translation,
     system_prompt,
 )
+from transcriber.files.textutil import escape_tags, fmt_time, gujarati_ratio, parse_time
 
 GU = [
     ("આજે હું તમને એક વાર્તા કહેવા માગું છું", 0.0, 4.0),
@@ -197,7 +197,7 @@ class TestRunTranslation(Base):
         self.assertFalse(list(self.run_dir.glob(".*.partial.jsonl")))
 
     def test_long_transcripts_go_in_passages_that_see_the_english_before(self):
-        with patch("asr.translate.BATCH_SEGMENTS", 2):
+        with patch("transcriber.english.translate.BATCH_SEGMENTS", 2):
             llm = FakeLLM()
             run_translation(self.transcript, llm)
         self.assertEqual([asked(call) for call in llm.calls], [["1"], ["2", "3"]])
@@ -218,7 +218,7 @@ class TestRunTranslation(Base):
         english = [s["text"] for s in json.loads(paths["translation_json"].read_text())["segments"]]
         self.assertEqual(english, ["Line 1.", "Line 2.", "Line 3."])
 
-    @patch("asr.translate.BATCH_SEGMENTS", 1)
+    @patch("transcriber.english.translate.BATCH_SEGMENTS", 1)
     def test_resume_translates_only_what_is_left(self):
         llm = FakeLLM()
         llm.fail_at = 3
@@ -233,7 +233,7 @@ class TestRunTranslation(Base):
         self.assertEqual(len(resumed.calls), 1)
         self.assertIn("English line 1", resumed.calls[0]["user"])
 
-    @patch("asr.translate.BATCH_SEGMENTS", 1)
+    @patch("transcriber.english.translate.BATCH_SEGMENTS", 1)
     def test_a_broken_line_is_dropped_so_later_progress_survives(self):
         llm = FakeLLM()
         llm.fail_at = 2
@@ -250,7 +250,7 @@ class TestRunTranslation(Base):
         run_translation(self.transcript, third)
         self.assertEqual(len(third.calls), 1)  # segment 2's saved line was not glued onto the broken one
 
-    @patch("asr.translate.BATCH_SEGMENTS", 1)
+    @patch("transcriber.english.translate.BATCH_SEGMENTS", 1)
     def test_changed_settings_refuse_to_resume_until_reset(self):
         llm = FakeLLM()
         llm.fail_at = 2
@@ -282,7 +282,7 @@ class TestRunTranslation(Base):
         run_translation(self.transcript, fresh, reset=True)  # --reset still translates everything
         self.assertEqual(asked(fresh.calls[0]), ["1", "2", "3"])
 
-    @patch("asr.translate.BATCH_SEGMENTS", 1)
+    @patch("transcriber.english.translate.BATCH_SEGMENTS", 1)
     def test_an_interrupted_translation_restarts_after_a_word_fix(self):
         llm = FakeLLM()
         llm.fail_at = 2
@@ -317,11 +317,14 @@ class TestRunTranslation(Base):
         llm = FakeLLM()
         llm.describe = lambda: "fake"
         args = argparse.Namespace(llm_model=None, tone="spoken", glossary=None, style_note="", label=None, channel=None)
-        with patch("asr.publish_common.DATA", self.run_dir), patch("asr.enrich.GeminiLLM", lambda model: llm):
+        with (
+            patch("transcriber.english.publish_common.DATA", self.run_dir),
+            patch("transcriber.english.enrich.GeminiLLM", lambda model: llm),
+        ):
             run_stages(self.transcript, args, translate=True, summarize=False)
         self.assertIn("Spell it Harisena.", llm.calls[0]["system"])
 
-    @patch("asr.translate.BATCH_SEGMENTS", 1)
+    @patch("transcriber.english.translate.BATCH_SEGMENTS", 1)
     def test_an_interrupted_translation_restarts_after_the_profile_changes(self):
         llm = FakeLLM()
         llm.fail_at = 2

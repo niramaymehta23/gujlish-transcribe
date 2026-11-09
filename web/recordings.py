@@ -1,4 +1,4 @@
-"""One stored copy of each recording. Every file's SHA-256 fingerprint is kept in recordings/.fingerprints.json, so
+"""One stored copy of each recording. Every file's SHA-256 fingerprint is kept in data/recordings/.fingerprints.json, so
 an upload identical to a stored recording reuses that file (the browser can even skip uploading it), and copies
 stored before this existed can be merged."""
 
@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 from threading import Lock
 
-import asr.storage as storage
-from asr.textutil import write_json
+import transcriber.files.storage as storage
+from transcriber.files.textutil import write_json
 
 INDEX = ".fingerprints.json"
 FINGERPRINT = re.compile(r"[0-9a-f]{64}")

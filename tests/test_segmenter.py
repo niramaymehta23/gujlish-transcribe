@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from asr.audio_stream import audio_chunks
-from asr.guards import check_segment, find_repetition
-from asr.segmenter import (
+from transcriber.speech.audio_stream import audio_chunks
+from transcriber.speech.guards import check_segment, find_repetition
+from transcriber.speech.segmenter import (
     FRAME,
     FRAME_SECONDS,
     AudioChunk,

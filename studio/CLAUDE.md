@@ -21,7 +21,7 @@ SRT and pass it with `--title`. Show the user any warning it prints.
 
 ## 2. Find the clips
 
-Read all of these: `rules/clip_rules.md`, `../channel.md`, the talk's summary if it has one, and every line of the
+Read all of these: `rules/clip_rules.md`, `../data/channel.md`, the talk's summary if it has one, and every line of the
 talk's `lines.txt`. Read the whole talk before proposing anything, because the best passages often need the context
 around them to judge where they really start and end.
 
@@ -102,7 +102,7 @@ Don't leave the same graphic up longer than the idea lasts. Open on a graphic ho
 graphic.
 
 **Stay true to the talk.** Every word on screen must come from what is said in the clip. Never add a teaching, a claim
-or a fact he didn't state. Keep names and terms as `../channel.md` spells them, including in captions you describe.
+or a fact he didn't state. Keep names and terms as `../data/channel.md` spells them, including in captions you describe.
 Follow its upasana section: never present the guru parampara differently from it. Keep "Swamiji" and "Guruhari" as
 said: never expand them into a full name on screen or in a title, because the audience knows who is meant. This needs
 no flag.
