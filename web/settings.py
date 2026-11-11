@@ -1,4 +1,4 @@
-"""Web app settings. Local use needs none; a hosted deployment sets GUJLISH_HOSTED=1 and the values below."""
+"""Web app settings. Local use needs none; a hosted deployment sets VAANI_HOSTED=1 and the values below."""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ def _gpu_job() -> str:
     """The Cloud Run GPU job to transcribe on, only when this site itself runs on Cloud Run (which sets K_SERVICE).
     Anywhere else, e.g. `python app.py` on a Mac, transcription always runs on this computer: a local test never
     starts a paid Google GPU, whatever the environment says."""
-    job = os.environ.get("GUJLISH_GPU_JOB", "").strip()
+    job = os.environ.get("VAANI_GPU_JOB", "").strip()
     if job and not os.environ.get("K_SERVICE"):
-        print("GUJLISH_GPU_JOB ignored: not running on Cloud Run, so transcription runs on this computer.", flush=True)
+        print("VAANI_GPU_JOB ignored: not running on Cloud Run, so transcription runs on this computer.", flush=True)
         return ""
     return job
 
@@ -52,28 +52,28 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        hosted = _flag("GUJLISH_HOSTED")
-        models = tuple(m.strip() for m in os.environ.get("GUJLISH_MODELS", "").split(",") if m.strip()) or MODELS
+        hosted = _flag("VAANI_HOSTED")
+        models = tuple(m.strip() for m in os.environ.get("VAANI_MODELS", "").split(",") if m.strip()) or MODELS
         unknown = set(models) - set(MODELS)
         if unknown:
-            raise ValueError(f"GUJLISH_MODELS lists unknown models: {', '.join(sorted(unknown))}")
+            raise ValueError(f"VAANI_MODELS lists unknown models: {', '.join(sorted(unknown))}")
         settings = cls(
             hosted=hosted,
-            password=os.environ.get("GUJLISH_ACCESS_PASSWORD", ""),
-            secret_key=os.environ.get("GUJLISH_SECRET_KEY", ""),
-            max_upload_mb=_number("GUJLISH_MAX_UPLOAD_MB", 300 if hosted else 4096),
-            max_minutes=_number("GUJLISH_MAX_MINUTES", 90 if hosted else 0),
-            retention_hours=_number("GUJLISH_RETENTION_HOURS", 24 if hosted else 0),
-            allow_gemini=_flag("GUJLISH_ALLOW_GEMINI") if hosted else True,
+            password=os.environ.get("VAANI_ACCESS_PASSWORD", ""),
+            secret_key=os.environ.get("VAANI_SECRET_KEY", ""),
+            max_upload_mb=_number("VAANI_MAX_UPLOAD_MB", 300 if hosted else 4096),
+            max_minutes=_number("VAANI_MAX_MINUTES", 90 if hosted else 0),
+            retention_hours=_number("VAANI_RETENTION_HOURS", 24 if hosted else 0),
+            allow_gemini=_flag("VAANI_ALLOW_GEMINI") if hosted else True,
             models=models,
             gpu_job=_gpu_job(),
-            project=os.environ.get("GUJLISH_PROJECT", "").strip(),
-            region=os.environ.get("GUJLISH_REGION", "").strip(),
-            gpu_hours_per_month=_number("GUJLISH_GPU_HOURS_PER_MONTH", 5),
-            gpu_pounds_per_hour=_number("GUJLISH_GPU_POUNDS_PER_HOUR", 0.77),
+            project=os.environ.get("VAANI_PROJECT", "").strip(),
+            region=os.environ.get("VAANI_REGION", "").strip(),
+            gpu_hours_per_month=_number("VAANI_GPU_HOURS_PER_MONTH", 5),
+            gpu_pounds_per_hour=_number("VAANI_GPU_POUNDS_PER_HOUR", 0.77),
         )
         if settings.gpu_job and not (settings.project and settings.region):
-            raise ValueError("GUJLISH_GPU_JOB needs GUJLISH_PROJECT and GUJLISH_REGION too")
+            raise ValueError("VAANI_GPU_JOB needs VAANI_PROJECT and VAANI_REGION too")
         if hosted and len(settings.secret_key) < 32:
-            raise ValueError("GUJLISH_HOSTED needs GUJLISH_SECRET_KEY set to a random value of at least 32 characters")
+            raise ValueError("VAANI_HOSTED needs VAANI_SECRET_KEY set to a random value of at least 32 characters")
         return settings

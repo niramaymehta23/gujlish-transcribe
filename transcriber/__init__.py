@@ -1,1 +1,1 @@
-"""Gujarati transcriber: speech recognition, English translation and publishing helpers."""
+"""HariSena Vaani Studio: speech recognition, English translation and publishing helpers."""

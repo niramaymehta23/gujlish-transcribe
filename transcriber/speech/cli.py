@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local Gujarati Transcriber CLI."""
+"""HariSena Vaani Studio command line: transcribe a recording on this computer."""
 
 from __future__ import annotations
 

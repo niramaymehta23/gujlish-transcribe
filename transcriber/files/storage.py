@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 # Everything private (recordings, outputs, channel.md, the correction dictionary) lives in data/ by default; a hosted
 # deployment points this at its mounted storage bucket, which holds the same files.
-DATA = Path(os.environ.get("GUJLISH_DATA_DIR") or ROOT / "data")
+DATA = Path(os.environ.get("VAANI_DATA_DIR") or ROOT / "data")
 RECORDINGS = DATA / "recordings"
 TRANSCRIPTS = DATA / "transcripts"
 PLOTS = DATA / "plots"

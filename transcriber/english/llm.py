@@ -18,9 +18,7 @@ import urllib.request
 from dataclasses import dataclass
 
 DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
-DEFAULT_GEMINI_MODEL = (
-    "gemini-3.8-flash"  # override with --llm-model / GUJLISH_GEMINI_MODEL when a newer model is in use
-)
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"  # override with --llm-model / VAANI_GEMINI_MODEL when a newer model is in use
 RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
@@ -133,8 +131,8 @@ class GeminiLLM:
     extra_payload = {"reasoning_effort": "low"}
 
     def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None):
-        self.model = model or os.environ.get("GUJLISH_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
-        self.base_url = (base_url or os.environ.get("GUJLISH_GEMINI_URL") or DEFAULT_GEMINI_URL).rstrip("/")
+        self.model = model or os.environ.get("VAANI_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
+        self.base_url = (base_url or os.environ.get("VAANI_GEMINI_URL") or DEFAULT_GEMINI_URL).rstrip("/")
         self.timeout = 300.0
         self._api_key = api_key if api_key is not None else gemini_key()
 

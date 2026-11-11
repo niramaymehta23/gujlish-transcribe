@@ -66,13 +66,13 @@ class HostedBase(unittest.TestCase):
 
 class TestSettings(unittest.TestCase):
     def test_hosted_defaults_and_validation(self):
-        with patch.dict("os.environ", {"GUJLISH_HOSTED": "1", "GUJLISH_SECRET_KEY": SECRET}, clear=True):
+        with patch.dict("os.environ", {"VAANI_HOSTED": "1", "VAANI_SECRET_KEY": SECRET}, clear=True):
             settings = Settings.from_env()
         self.assertEqual((settings.max_upload_mb, settings.max_minutes, settings.retention_hours), (300, 90, 24))
         self.assertFalse(settings.allow_gemini)
-        with patch.dict("os.environ", {"GUJLISH_HOSTED": "1"}, clear=True), self.assertRaises(ValueError):
+        with patch.dict("os.environ", {"VAANI_HOSTED": "1"}, clear=True), self.assertRaises(ValueError):
             Settings.from_env()  # no secret key
-        env = {"GUJLISH_MODELS": "gujlish,whisper"}
+        env = {"VAANI_MODELS": "gujlish,whisper"}
         with patch.dict("os.environ", env, clear=True), self.assertRaises(ValueError):
             Settings.from_env()
         with patch.dict("os.environ", {}, clear=True):
@@ -107,7 +107,7 @@ class TestUploadsAndPrivacy(HostedBase):
         saved = self.root / "recordings" / "talk.wav"
         self.assertEqual(saved.read_bytes(), self.source.read_bytes())
         self.assertEqual(Path(job["run_dir"], ".owner").exists(), True)
-        self.assertEqual(list((self.root / "tmp" / "gujlish-uploads").glob("*")), [])
+        self.assertEqual(list((self.root / "tmp" / "vaani-uploads").glob("*")), [])
 
     def test_out_of_order_and_oversized_pieces(self):
         client = self.app(max_upload_mb=1).test_client()

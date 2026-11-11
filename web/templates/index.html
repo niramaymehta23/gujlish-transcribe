@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gujarati Transcriber · {{ "Online" if hosted else "Local" }} transcription</title>
+  <title>HariSena Vaani Studio · {{ "Online" if hosted else "Local" }} workspace</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body class="workspace-page" data-hosted="{{ 1 if hosted else 0 }}" data-chunk-bytes="{{ chunk_bytes }}" data-max-upload-mb="{{ max_upload_mb }}">
-<header class="topbar"><a class="brand" href="/" aria-label="Gujarati Transcriber home"><span class="brand-mark" lang="gu">અ</span>Gujarati Transcriber</a><span class="local"><i></i> {{ "Online workspace" if hosted else "Local workspace" }}{% if hosted %}<span id="gpu-usage" hidden title="GPU time used by transcriptions this month (UTC), and its estimated cost"></span>{% endif %}</span></header>
+<header class="topbar"><a class="brand" href="/" aria-label="HariSena Vaani Studio home"><span class="brand-mark" lang="gu">અ</span>HariSena Vaani Studio</a><span class="local"><i></i> {{ "Online workspace" if hosted else "Local workspace" }}{% if hosted %}<span id="gpu-usage" hidden title="GPU time used by transcriptions this month (UTC), and its estimated cost"></span>{% endif %}</span></header>
 <div class="app">
   <aside class="sidebar" aria-label="Recordings">
     <form id="upload-form" class="new-run">

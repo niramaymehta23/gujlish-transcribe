@@ -38,7 +38,7 @@ print(next((c['name'] for c in json.load(sys.stdin).get('notificationChannels', 
             if c.get('labels', {}).get('email_address') == email), ''))" "$ALERT_EMAIL")
   if [[ -z "$channel" ]]; then
     channel=$(api POST "$monitoring/notificationChannels" \
-      "{\"type\": \"email\", \"displayName\": \"Gujarati transcriber costs\", \"labels\": {\"email_address\": \"$ALERT_EMAIL\"}}" |
+      "{\"type\": \"email\", \"displayName\": \"HariSena Vaani Studio costs\", \"labels\": {\"email_address\": \"$ALERT_EMAIL\"}}" |
       python3 -c "import json, sys; print(json.load(sys.stdin)['name'])")
   fi
   alert() {  # alert NAME FILTER SECONDS: email when the summed billable time over a day goes above SECONDS
@@ -105,7 +105,7 @@ gcloud functions deploy gujlish-killswitch --gen2 --project "$PROJECT_ID" --regi
   --service-account "$killer" --memory 256Mi --max-instances 1 \
   --set-env-vars "PROJECT_ID=$PROJECT_ID,REGION=$REGION,SERVICE=$SERVICE,GPU_JOB=$GPU_JOB" >/dev/null
 
-name="Gujarati transcriber monthly budget"
+name="HariSena Vaani Studio monthly budget"
 existing=$(gcloud billing budgets list --billing-account "$BILLING_ACCOUNT" \
   --filter "displayName=\"$name\"" --format 'value(name)' | head -1)
 rules=(--threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0)

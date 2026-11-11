@@ -15,17 +15,17 @@ This deployment runs **Flex only** (`MODELS="flex"` in `deploy/config.sh`) for t
 
 ## What the hosted site does differently
 
-`GUJLISH_HOSTED=1` (set in the Docker image) switches on:
+`VAANI_HOSTED=1` (set in the Docker image) switches on:
 
 | Behavior | Default when hosted | Change with |
 | --- | --- | --- |
 | Password for the whole site | Whatever you entered in setup, or none | `deploy/setup.sh` |
 | Visitors see only their own runs | Always | — |
-| Upload size limit | 300 MB | `GUJLISH_MAX_UPLOAD_MB` |
-| Recording length limit | 90 minutes | `GUJLISH_MAX_MINUTES` |
-| Recordings and results deleted | Never: kept in your bucket until you delete them | `GUJLISH_RETENTION_HOURS` |
+| Upload size limit | 300 MB | `VAANI_MAX_UPLOAD_MB` |
+| Recording length limit | 90 minutes | `VAANI_MAX_MINUTES` |
+| Recordings and results deleted | Never: kept in your bucket until you delete them | `VAANI_RETENTION_HOURS` |
 | One recording in progress per visitor | Always | — |
-| Translation and summaries | On when a Gemini key is stored (setup asks for it); Gemini runs on your API key | `GUJLISH_ALLOW_GEMINI` |
+| Translation and summaries | On when a Gemini key is stored (setup asks for it); Gemini runs on your API key | `VAANI_ALLOW_GEMINI` |
 | Large uploads | Sent in 8 MB pieces, because Cloud Run caps one request at 32 MB | — |
 
 Visitors are told apart by a signed cookie. Someone who clears their cookies or switches browsers no longer sees their earlier runs.

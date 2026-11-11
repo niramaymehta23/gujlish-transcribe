@@ -264,7 +264,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     tasks = {}  # (job id, step) -> the queued task allowed to run it; stopping or queueing again changes it
     stopping = {}  # (job id, step) -> why its process is being stopped: "pause", "stop" or "delete"
     deleted = set()  # run folders being removed in the background
-    uploads_dir = Path(tempfile.gettempdir()) / "gujlish-uploads"  # local disk, not the mounted bucket
+    uploads_dir = Path(tempfile.gettempdir()) / "vaani-uploads"  # local disk, not the mounted bucket
     last_sweep = [0.0]
     sequence = [0]
     recovered = [False]
