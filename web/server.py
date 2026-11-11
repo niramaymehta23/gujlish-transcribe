@@ -969,6 +969,10 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
                 current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
                 view["english_stale"] = [s.get("source") for s in english] != current
+                # The page shows each line's English under it. Only segments with text were translated, in order,
+                # and a sample translation stops early: the others get None.
+                lines = iter(s.get("text", "") for s in english)
+                view["english_segments"] = [next(lines, None) if s.get("text", "").strip() else None for s in segments]
             # A translation made before the caption step, or whose captions were not redone after it changed.
             view["captions_stale"] = state["captions"]["status"] != "running" and not captions_current(transcript_json)
         if state["summary"]["status"] == "complete":
@@ -1441,6 +1445,15 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     state = job.get(key) or {}
                     if state.get("status") in {"queued", "running", "error"}:
                         entry[key] = {"status": state["status"], "progress": state.get("progress")}
+            if entry["status"] == "complete":
+                # For the talk list's "Summary ready" / "English ready": the furthest finished step, found with as
+                # few file checks as possible (each one is a storage request on the hosted site).
+                for key in ("summary", "translation"):
+                    if key in entry:  # queued, running or failed: look one step back
+                        continue
+                    if stage_view(job, key)["status"] == "complete":
+                        entry[key] = {"status": "complete", "progress": 100}
+                        break
             runs.append(entry)
             if len(runs) >= 100:
                 break

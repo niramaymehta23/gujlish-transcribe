@@ -4,7 +4,7 @@ Turn Gujarati and Gujarati–English talks into text on your own computer, then 
 
 - **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
 - **Gujlish too.** The same transcript in Latin letters ("kem cho"), word for word, made on your computer with AI4Bharat's IndicXlit.
-- **Fix words, and it learns.** Click a misheard word, type the right one in Gujarati or Gujlish, and the fix is saved to your dictionary, which corrects every later transcript automatically.
+- **Fix words, and it learns.** Double-click a misheard word, type the right one in Gujarati or Gujlish, and the fix is saved to your dictionary, which corrects every later transcript automatically.
 - **Runs locally.** Transcription happens on your computer and your audio never leaves it. Only if you translate is the transcript *text* sent to Gemini.
 - **Browser app and command line.** Drop a file into the web page, or script it from the terminal.
 - **Handles long recordings.** Audio is cut at natural pauses, and an interrupted run picks up where it stopped.
@@ -96,14 +96,14 @@ Open **[http://localhost:8765](http://localhost:8765)** in your browser. To stop
 
 Then:
 
-1. **Add a recording.** Drop it anywhere on the page or click **New recording**. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV). If it is a recording you have already transcribed (even renamed), the app asks whether to open that one instead. The app recognises recordings by a fingerprint of the audio, keeps one copy of each, and never uploads audio it already has.
-2. **Choose a model.** Keep **Flex** for the best results. Its **output script** can keep English words in English letters (the default) or write everything in Gujarati script. **Gujlish** is a smaller comparison model.
-3. **Click Transcribe.** The recording appears under **Recordings** with its progress, and you can open other recordings while it works. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the **Gujlish** tab fills in straight after.
-4. **Fix any misheard words** in the **Gujarati** or **Gujlish** tab (see [below](#fix-words-and-build-your-dictionary)).
-5. **Read, copy or download** each version as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
-6. **Optional:** once the words are right, open **English** or **Summary & YouTube** and click **Translate & write summary** (see [below](#translate-to-english-and-summarize-optional)).
+1. **Add a recording.** Drop it anywhere on the page or click **Choose a file**; it starts straight away. Most audio formats work (M4A, MP3, WAV, OPUS, OGG, FLAC, AAC, WEBM, AIFF, WMA), as well as the audio in video files (MP4, MOV, MKV). If it is a recording you have already transcribed (even renamed), the app asks whether to open that one instead. The app recognises recordings by a fingerprint of the audio, keeps one copy of each, and never uploads audio it already has.
+2. **Optional: change the model** first with **Change** under the drop area. Keep **Flex** for the best results. Its **output script** can keep English words in English letters (the default) or write everything in Gujarati script. **Gujlish** is a smaller comparison model.
+3. **Watch it work.** The talk appears under **Your talks** with its progress, and you can open other talks while it works. The first run also waits for the model to download and load. Your dictionary's fixes are applied as soon as the Gujarati is ready, and the Gujlish fills in straight after.
+4. **Fix any misheard words** on the talk's page. Switch the script between **ગુજરાતી**, **Gujlish** and **Both** (see [below](#fix-words-and-build-your-dictionary)).
+5. **Read, copy or download** each version from **Export** as TXT, DOCX or SRT (subtitles with timestamps, for video players and editors).
+6. **Optional:** once the words are right, click **Translate & summarise** in the bar at the bottom. The English appears under each Gujarati line, and **See summary** opens the summary and YouTube text (see [below](#translate-to-english-and-summarize-optional)).
 
-**Recordings** on the left lists every run and what it is doing, even after restarting the app. While a recording is being transcribed you can:
+**Your talks** on the home page lists every run and what it is doing, even after restarting the app. While a recording is being transcribed you can:
 
 - **Pause** it: finished chunks are kept, and **Resume** continues from there.
 - **Cancel** it: after asking, the run and its uploaded recording are deleted. A finished run has **Delete** instead.
@@ -129,13 +129,13 @@ Nothing is overwritten: a file or folder that already exists in `data/` is left 
 
 Speech recognition mishears some words, often the same ones every time: names, places, terms. Fix them once and the app fixes them for you from then on.
 
-1. **Click a word** in the **Gujarati** or **Gujlish** tab. Shift-click or drag to pick several words; **+ word before / after** extends the choice on a phone.
-2. **Type the right word** in either box. Typing Gujlish (English letters) fills in the Gujarati and offers spellings to tap, so you don't need a Gujarati keyboard. Typing Gujarati fills in the Gujlish. If you only respell the Gujlish, the Gujarati is kept and just the spelling is saved.
-3. **Replace.** *Also fix the other N places* changes every match in this recording. *Remember for future recordings* saves the fix to your dictionary (both are on by default).
+1. **Double-click a word** (or select it and press Enter). Drag across words, or Shift + double-click, to pick several; **More** in the fixer has **+ word before / after** for a phone and the Gujarati spellings to tap.
+2. **Type the right word** in either box. Typing Gujlish (English letters) fills in the Gujarati and offers spellings under **More**, so you don't need a Gujarati keyboard. Typing Gujarati fills in the Gujlish. If you only respell the Gujlish, the Gujarati is kept and just the spelling is saved.
+3. **Save** (or press Enter). *All N in this talk* changes every match in this recording. *Remember* saves the fix to your dictionary (both are on by default).
 
-A word that was misheard once can be the right word somewhere else, so a saved fix **asks** by default. In new transcripts the words it would change are highlighted; click one to **Accept** the fix there or choose **Not here, keep as heard**. Press **▶** beside the heard words to hear just that moment of the recording (it works for any words you pick). Both answers are remembered as evidence. For a fix that can never be wrong (a garbled name, say), tick *Fix it in future without asking* or switch it to **Always** in the Dictionary list: those words are replaced straight away and underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date (an orange dot); **Update English, summary & YouTube** re-translates only the lines you changed.
+A word that was misheard once can be the right word somewhere else, so a saved fix **asks** by default. In new transcripts the words it would change are highlighted; double-click one to **Accept** the fix there or choose **Not here, keep as heard**. Press **▶** beside the heard words to hear just that moment of the recording (it works for any words you pick). Both answers are remembered as evidence. For a fix that can never be wrong (a garbled name, say), tick *Fix without asking* or switch it to **Always** in the Dictionary list: those words are replaced straight away and underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date; **Update English & summary** in the bottom bar re-translates only the lines you changed.
 
-The **Dictionary** list on the left shows what you've taught it: **Asks** / **Always** switches a fix between the two, and **×** forgets it. It is stored in `data/dictionary.json` (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish and, for the latest five times you made or accepted it and the latest five times you rejected it, the sentence, its time and a short audio clip of that stretch in `data/dictionary-clips/`. The app doesn't judge fixes from the clips: in a test on 21 real fixes, the sound alone picked the right word only twice, because most fixes come from knowing the talk, not from how it sounds. That's why you decide, by ear, with ▶. Fixes saved before this version ask until you switch them to Always.
+The **Dictionary** page (top right) shows what you've taught it: **Asks** / **Always** switches a fix between the two, and **×** forgets it. It is stored in `data/dictionary.json` (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish and, for the latest five times you made or accepted it and the latest five times you rejected it, the sentence, its time and a short audio clip of that stretch in `data/dictionary-clips/`. The app doesn't judge fixes from the clips: in a test on 21 real fixes, the sound alone picked the right word only twice, because most fixes come from knowing the talk, not from how it sounds. That's why you decide, by ear, with ▶. Fixes saved before this version ask until you switch them to Always.
 
 ## Use the command line
 
@@ -168,7 +168,7 @@ The transcript is saved as `data/transcripts/talk/flex-mixed/<date-time>/talk.fl
 
 ## Translate to English and summarize (optional)
 
-After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. This uses **Google's Gemini** and needs your own Gemini API key. Without a key, transcription still works; only the English and Summary & YouTube tabs stay off.
+After transcribing, the app can translate into **natural spoken English that keeps the speaker's tone**, and summarize the English into an overview, main points by theme, key stories, quotes and names. This uses **Google's Gemini** and needs your own Gemini API key. Without a key, transcription still works; only the English and summary stay off.
 
 **Privacy and cost:** only the transcript *text* is sent to Google, never the audio. Gemini charges per use; at Google's published prices a long recording usually costs well under a dollar. Check Google's data-use terms for your key's tier before sending private recordings.
 
@@ -191,7 +191,7 @@ This lasts until you close that terminal. To avoid repeating it, add `export GEM
 
 ### 3. Translate and summarize
 
-Fix the words first, then open the **English** or **Summary & YouTube** tab and click **Translate & write summary**. The corrected Gujarati (not the Gujlish, which is less precise) is translated, then summarized, with a YouTube title and description. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
+Fix the words first, then click **Translate & summarise** in the bar at the bottom of the talk. The corrected Gujarati (not the Gujlish, which is less precise) is translated, then summarized, with a YouTube title and description. The English can be downloaded as TXT, DOCX or SRT, and the summary as Markdown or DOCX.
 
 ### From the command line
 
@@ -210,7 +210,7 @@ Useful options: `--tone faithful` for a closer, plainer translation; `--style-no
 
 ### YouTube title and description
 
-The **Summary & YouTube** step also writes a YouTube title (plus alternatives), a description ready to paste, chapters and tags. They sit at the top of the summary, with buttons to copy the title and the description. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
+The **Summary & YouTube** step also writes a YouTube title (plus alternatives), a description ready to paste, chapters and tags. They sit below the summary under **For YouTube**, with buttons to copy the title and the description. YouTube's limits are enforced by the program: titles of at most 100 characters, no `<` or `>`, a description of at most 5,000 characters, tags of at most 500, and chapters only when there are at least three, starting at 0:00 and 10 seconds apart.
 
 Tell it about your channel with plain-text files in `data/` (kept out of Git); copy the templates from `examples/` to start:
 
@@ -235,7 +235,7 @@ Finding clips, storyboards and Remotion videos run in Claude Code on your own co
 | "Address already in use" | Another copy is running. Stop it, or use `python app.py --port 8766`. |
 | Very slow | The first run downloads and loads the model. Without an Apple or NVIDIA GPU, transcription runs on the CPU and takes much longer. |
 | A quiet recording comes out empty | Try `--chunking fixed` on the command line, which doesn't rely on detecting speech. |
-| The English tab says to set `GEMINI_API_KEY` | Stop the app, set the key in that terminal (see [step 2](#2-give-the-key-to-the-app)), and start it again. |
+| The bottom bar says to set `GEMINI_API_KEY` | Stop the app, set the key in that terminal (see [step 2](#2-give-the-key-to-the-app)), and start it again. |
 
 ## Project layout
 

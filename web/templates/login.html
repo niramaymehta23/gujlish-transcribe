@@ -6,15 +6,16 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/" aria-label="HariSena Vaani Studio home"><span class="brand-mark" lang="gu">અ</span>HariSena Vaani Studio</a></header>
-<main class="login">
-  <form method="post" class="login-form">
-    <h1>Sign in</h1>
-    <p>Enter the password you were given to use this transcriber.</p>
-    <label class="field-label" for="password">Password</label>
+<header class="topbar"><a class="brand" href="/" aria-label="HariSena Vaani Studio home"><span class="brand-mark" lang="gu">અ</span><span class="brand-name">HariSena Vaani Studio</span></a></header>
+<main class="signin">
+  <form method="post">
+    <h1 class="hero signin-title">Sign in</h1>
+    <p class="tagline signin-tagline" lang="gu">અવાજથી શબ્દો સુધી</p>
+    <p class="lede">Enter the password you were given to use this transcriber.</p>
+    <label for="password" class="field-label">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-    {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
-    <button class="primary" type="submit">Continue</button>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <button class="btn btn-accent signin-button" type="submit">Continue</button>
   </form>
 </main>
 </body>

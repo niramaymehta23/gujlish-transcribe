@@ -6,108 +6,185 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
-<body class="workspace-page" data-hosted="{{ 1 if hosted else 0 }}" data-chunk-bytes="{{ chunk_bytes }}" data-max-upload-mb="{{ max_upload_mb }}">
-<header class="topbar"><a class="brand" href="/" aria-label="HariSena Vaani Studio home"><span class="brand-mark" lang="gu">અ</span>HariSena Vaani Studio</a><span class="local"><i></i> {{ "Online workspace" if hosted else "Local workspace" }}{% if hosted %}<span id="gpu-usage" hidden title="GPU time used by transcriptions this month (UTC), and its estimated cost"></span>{% endif %}</span></header>
-<div class="app">
-  <aside class="sidebar" aria-label="Recordings">
-    <form id="upload-form" class="new-run">
-      <label class="dropzone" id="dropzone" for="audio-input">
-        <input id="audio-input" name="audio" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.opus,.ogg,.flac,.aac,.webm,.mp4,.mov,.mkv,.aiff,.wma">
-        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><path d="M16 22V5m-6 6 6-6 6 6M6 22v5h20v-5"/></svg>
-        <span class="drop-text"><strong id="file-name">New recording</strong><span id="file-detail">Drop audio here or click to choose</span></span>
-      </label>
-      <div id="start-row" class="start-row" hidden>
+<body data-hosted="{{ 1 if hosted else 0 }}" data-chunk-bytes="{{ chunk_bytes }}" data-max-upload-mb="{{ max_upload_mb }}">
+<header class="topbar">
+  <a class="brand" href="/" id="home-link" aria-label="HariSena Vaani Studio home"><span class="brand-mark" lang="gu">અ</span><span class="brand-name">HariSena Vaani Studio</span></a>
+  <div class="top-actions">
+    <span class="workspace"><i aria-hidden="true"></i>{{ "Online workspace" if hosted else "Local workspace" }}{% if hosted %}<span id="gpu-usage" hidden title="GPU time used by transcriptions this month (UTC), and its estimated cost"></span>{% endif %}</span>
+    <button class="btn" id="all-talks" type="button" hidden><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h8"/></svg>All talks</button>
+    <button class="btn" id="open-dict" type="button">Dictionary<span id="dict-count" class="count"></span></button>
+    <button class="btn btn-strong" id="export-btn" type="button" aria-expanded="false" aria-controls="export" hidden><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13h10"/></svg>Export</button>
+  </div>
+</header>
+
+<main class="column home" id="home">
+  <div>
+    <h1 class="hero">Drop a talk.<br><span>Get it in words.</span></h1>
+    <p class="tagline" lang="gu">અવાજથી શબ્દો સુધી</p>
+  </div>
+  <form id="upload-form">
+    <label class="well" id="well" for="audio-input">
+      <input id="audio-input" name="audio" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.opus,.ogg,.flac,.aac,.webm,.mp4,.mov,.mkv,.aiff,.wma">
+      <span class="ghost-glyph" aria-hidden="true" lang="gu">અ</span>
+      <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="big" id="well-title">Drop audio or video here</span>
+      <span class="btn btn-dark" aria-hidden="true">Choose a file</span>
+      <span class="note">M4A, MP3, WAV, OPUS, FLAC, AAC, WEBM or a video’s sound · up to {{ upload_limit }}{% if max_minutes %}, {{ max_minutes }} minutes{% endif %} · starts straight away</span>
+    </label>
+    <details class="options" id="options">
+      <summary><span id="options-text">English words come out in English letters.</span> <span class="link">Change</span></summary>
+      <div class="options-body">
         <select name="model" id="model" aria-label="Transcription model"{% if models|length == 1 %} hidden{% endif %}>{% if "flex" in models %}<option value="flex">Flex · Gujarati + English</option>{% endif %}{% if "gujlish" in models %}<option value="gujlish">Gujlish · CTC comparison</option>{% endif %}</select>
         <select name="mode" id="mode" aria-label="Output script"{% if "flex" not in models %} hidden{% endif %}><option value="mixed">English words in English letters</option><option value="native">Everything in Gujarati script</option></select>
-        <div class="start-actions"><button class="secondary" id="clear-file" type="button">Clear</button><button class="primary" id="start-button" type="submit">Transcribe <span aria-hidden="true">↗</span></button></div>
       </div>
-      <p class="formats">M4A, MP3, WAV, OPUS, FLAC, AAC, WEBM or a video's sound · up to {{ upload_limit }}{% if max_minutes %}, {{ max_minutes }} minutes{% endif %}</p>
-    </form>
-    <div class="side-tabs" role="tablist" aria-label="Sidebar">
-      <button type="button" role="tab" id="side-runs" aria-selected="true">Recordings <span id="runs-count" class="count"></span></button>
-      <button type="button" role="tab" id="side-dict" aria-selected="false">Dictionary <span id="dict-count" class="count"></span></button>
+    </details>
+  </form>
+
+  <section class="card busy-card" id="busy" hidden aria-live="polite">
+    <div class="busy-head">
+      <div><p class="busy-label" id="busy-label"></p><p class="busy-name" id="busy-name"></p></div>
+      <button class="btn btn-outline" id="busy-action" type="button"></button>
     </div>
-    <div id="runs-pane" class="side-pane"><div id="history" class="runs"><p class="muted">Loading…</p></div></div>
-    <div id="dict-pane" class="side-pane" hidden>
-      <p class="muted dict-intro">Fixes you save are looked for in every new transcript. <b>Asks</b>: the words are marked for you to accept or reject. <b>Always</b>: they are replaced without asking. Click to switch.</p>
-      <div id="dictionary"></div>
-      <details id="spellings" hidden><summary class="muted">Gujlish spellings · <span id="spelling-count"></span></summary><div id="spelling-list"></div></details>
+    <div class="wave" id="busy-wave" aria-hidden="true"></div>
+    <div class="busy-foot"><span id="busy-detail"></span><span class="mono" id="busy-percent"></span></div>
+  </section>
+
+  <section aria-labelledby="talks-title">
+    <p id="home-notice" class="run-notice" role="status"></p>
+    <h2 class="section-title" id="talks-title">Your talks <span id="runs-count" class="count"></span></h2>
+    <div id="history" class="talks"><p class="muted">Loading…</p></div>
+  </section>
+
+  <footer class="foot-notes">
+    {% if hosted %}<p>Processed on this site’s server. Only you can see your recordings and results{% if retention_hours %}, and they are deleted after {{ retention_hours }} hours{% endif %}.</p>{% else %}<p>Processed on this computer. Recordings and results stay in your project folders.</p>{% endif %}
+    {% if "flex" in models %}<p>Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat.</p>{% endif %}
+  </footer>
+</main>
+
+<main class="column" id="dict-view" hidden>
+  <h1 class="title">Dictionary</h1>
+  <p class="lede">Fixes you save are looked for in every new transcript. <b>Asks</b>: the words are marked for you to accept or reject. <b>Always</b>: they are replaced without asking. Click to switch.</p>
+  <div id="dictionary" class="dict-list"></div>
+  <details id="spellings" class="spellings" hidden><summary>Gujlish spellings · <span id="spelling-count"></span></summary><div id="spelling-list" class="dict-list"></div></details>
+</main>
+
+<main class="column" id="run-view" hidden>
+  <div class="run-top">
+    <p class="meta" id="run-meta"></p>
+    <div class="run-actions">
+      <span id="run-state" class="status-pill"></span>
+      <button id="pause-button" class="btn btn-outline btn-sm" type="button" hidden>Pause</button>
+      <button id="resume-button" class="btn btn-accent btn-sm" type="button" hidden>Resume</button>
+      <button id="delete-button" class="btn btn-outline btn-sm danger" type="button">Delete</button>
     </div>
-    <div class="side-foot">
-      {% if hosted %}<p>Processed on this site’s server. Only you can see your recordings and results{% if retention_hours %}, and they are deleted after {{ retention_hours }} hours{% endif %}.</p>{% else %}<p>Processed on this computer. Recordings and results stay in your project folders.</p>{% endif %}
-      {% if "flex" in models %}<p>Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat.</p>{% endif %}
+  </div>
+  <h1 class="title" id="run-title"></h1>
+  <nav class="steps" id="steps" aria-label="Steps"></nav>
+  <p id="run-notice" class="run-notice" role="status"></p>
+
+  <section id="processing" class="card processing" hidden aria-live="polite">
+    <div class="busy-head">
+      <div><p class="busy-label" id="status-label"></p><p class="status-detail" id="status-detail"></p></div>
+      <span id="spinner" class="spinner" aria-hidden="true"></span>
     </div>
-  </aside>
-  <main class="main" id="main">
-    <div id="empty-state" class="empty-state"><div class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><h2>Pick a recording, or add a new one.</h2><p>Drop an audio file anywhere on this page. Everything you’ve transcribed is under Recordings, and you can open any of them while others are still working.</p><span lang="gu" class="gujarati-note">અવાજથી શબ્દો સુધી</span></div>
-    <section id="run-view" class="run-view" hidden>
-      <div class="run-head">
-        <div class="run-title"><h1 id="run-title"></h1><p id="run-meta"></p></div>
-        <div class="run-actions">
-          <span id="run-state" class="state"></span>
-          <button id="pause-button" class="secondary" type="button" hidden>Pause</button>
-          <button id="resume-button" class="primary" type="button" hidden>Resume</button>
-          <button id="delete-button" class="secondary danger" type="button">Delete</button>
-        </div>
-      </div>
-      <p id="run-notice" class="run-notice" role="status"></p>
-      <div id="processing" class="status-card" hidden aria-live="polite">
-        <div class="status-line"><span id="spinner" class="spinner" aria-hidden="true"></span><div><h3 id="status-label"></h3><p id="status-detail"></p></div></div>
-        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
-        <div class="progress-caption"><span id="progress-description"></span><span id="progress-percent"></span></div>
-      </div>
-      <div id="result" class="result" hidden>
-        <div class="result-bar">
-          <div class="tabs" role="tablist" aria-label="Result views">
-            <button type="button" role="tab" class="tab" id="tab-transcript" aria-selected="true">Gujarati</button>
-            <button type="button" role="tab" class="tab" id="tab-gujlish" aria-selected="false">Gujlish</button>
-            <button type="button" role="tab" class="tab" id="tab-translation" aria-selected="false">English</button>
-            <button type="button" role="tab" class="tab" id="tab-summary" aria-selected="false">Summary &amp; YouTube</button>
+    <div class="wave" id="progress-wave" aria-hidden="true"></div>
+    <div class="busy-foot"><span id="progress-description"></span><span class="mono" id="progress-percent"></span></div>
+  </section>
+
+  <section id="result" hidden>
+    <div id="text-view">
+      <div class="textbar">
+        <p class="hint"><span id="hint"></span> <span id="edit-note" class="edit-note" aria-live="polite"></span></p>
+        <div class="textbar-tools">
+          <button id="copy-button" class="btn btn-sm" type="button">Copy</button>
+          <div class="seg" role="radiogroup" aria-label="Script">
+            <button type="button" role="radio" data-script="gu" lang="gu">ગુજરાતી</button>
+            <button type="button" role="radio" data-script="lat">Gujlish</button>
+            <button type="button" role="radio" data-script="both">Both</button>
           </div>
-          <div class="export-actions"><button id="copy-title" class="secondary" type="button" hidden>Copy YouTube title</button><button id="copy-description" class="secondary" type="button" hidden>Copy YouTube description</button><button id="copy-button" class="secondary" type="button">Copy text</button><a id="txt-download" class="secondary" href="#">↓ TXT</a><a id="docx-download" class="secondary" href="#">↓ DOCX</a><a id="srt-download" class="secondary" href="#">↓ SRT</a></div>
         </div>
-        <div id="stage-box" class="stage-box" hidden>
-          <div class="stage-row">
-            <p id="stage-explain"></p>
-            <div class="stage-controls">
-              <button id="stage-alt" class="secondary" type="button" hidden>Redo with Gemini</button>
-              <button id="stage-stop" class="secondary" type="button" hidden>Stop</button>
-              <button id="stage-button" class="primary" type="button">Translate &amp; write summary</button>
-            </div>
-          </div>
-          <div id="stage-track" class="progress-track" hidden><div id="stage-fill" class="progress-fill"></div></div>
-          <p id="stage-status" class="muted" aria-live="polite"></p>
-          <p id="llm-note" class="muted">Runs with Gemini · sends the transcript text (not the audio) to Google</p>
+      </div>
+      <div id="gujlish-bar" class="stage-strip" hidden>
+        <p id="gujlish-explain"></p>
+        <div class="strip-actions">
+          <button id="gujlish-alt" class="btn btn-outline btn-sm" type="button" hidden>Redo with Gemini</button>
+          <button id="gujlish-stop" class="btn btn-outline btn-sm" type="button" hidden>Stop</button>
+          <button id="gujlish-button" class="btn btn-accent btn-sm" type="button" hidden>Write Gujlish</button>
         </div>
-        <p id="edit-hint" class="hint">Click a word to fix it. Shift-click or drag to pick several words. <span id="edit-note" class="edit-note" aria-live="polite"></span></p>
-        <div class="panels">
-          <div id="transcript" class="transcript lines" role="tabpanel" tabindex="0"></div>
-          <div id="gujlish" class="transcript lines" role="tabpanel" tabindex="0" hidden></div>
-          <div id="translation" class="transcript" role="tabpanel" tabindex="0" hidden></div>
-          <div id="summary" class="transcript summary" role="tabpanel" tabindex="0" hidden></div>
-        </div>
-        <p class="result-note">Review names and technical terms before sharing. The English, summary and YouTube details are machine-generated.</p>
+        <p id="gujlish-status" class="small" aria-live="polite"></p>
+      </div>
+      <article class="sheet" id="sheet" aria-label="Transcript" tabindex="-1"></article>
+    </div>
+    <section id="summary-view" class="summary" hidden aria-label="Summary">
+      <div class="summary-head"><p class="label">Summary</p><button id="copy-summary" class="btn btn-outline btn-sm" type="button">Copy</button></div>
+      <div id="summary" class="summary-body"></div>
+      <div class="yt" id="youtube" hidden>
+        <div class="yt-head"><strong>For YouTube</strong><span class="mono small">from the summary</span></div>
+        <div class="yt-row"><div><p class="label">Title</p><p id="yt-title"></p></div><button class="btn btn-outline btn-sm" id="copy-title" type="button">Copy</button></div>
+        <div class="yt-row"><div><p class="label">Description</p><p id="yt-description" class="yt-description"></p></div><button class="btn btn-outline btn-sm" id="copy-description" type="button">Copy</button></div>
       </div>
     </section>
-  </main>
+    <p class="result-note">Review names and technical terms before sharing. The English, summary and YouTube details are machine-generated.</p>
+  </section>
+</main>
+
+<div class="dock-wrap" id="dock-wrap" hidden>
+  <div class="dock" id="dock">
+    <span class="status"><i aria-hidden="true"></i><span id="dock-note" aria-live="polite"></span></span>
+    <span class="dock-track" id="dock-track" hidden><i id="dock-fill"></i></span>
+    <button class="btn btn-ghost" id="dock-alt" type="button" hidden></button>
+    <button class="btn btn-accent" id="dock-go" type="button" hidden></button>
+  </div>
+  <p class="dock-note" id="llm-note" hidden>Runs with Gemini · sends the transcript text (not the audio) to Google</p>
 </div>
+
+<section class="export" id="export" hidden aria-label="Export">
+  <div class="export-head"><h2>Take it with you</h2><button class="btn icon" id="export-close" type="button" aria-label="Close export">×</button></div>
+  <div class="export-row"><strong lang="gu">ગુજરાતી</strong><span class="files" data-row="transcript"></span></div>
+  <div class="export-row"><strong>Gujlish</strong><span class="files" data-row="gujlish"></span></div>
+  <div class="export-row"><strong>English</strong><span class="files" data-row="translation"></span></div>
+  <div class="export-row"><strong>Summary</strong><span class="files" data-row="summary"></span></div>
+  <p class="small export-foot">SRT keeps the timestamps. Check names before you share: the English and summary are machine-made.</p>
+</section>
+
+<div id="editor-home" hidden>
+  <form id="editor" class="fixer" aria-label="Fix words" novalidate>
+    <div id="ed-suggestion" class="ed-suggestion" hidden>
+      <span>Your dictionary suggests <b id="ed-suggested" lang="gu"></b> here.</span>
+      <button id="ed-dismiss" class="btn btn-outline btn-sm" type="button">Not here, keep as heard</button>
+    </div>
+    <div class="heard">
+      <button id="ed-play" class="play" type="button" title="Play these words" aria-label="Play these words">&#9654;</button>
+      <span>Heard</span><span id="ed-heard" class="heard-gu" lang="gu"></span><span id="ed-heard-latin" class="mono"></span>
+    </div>
+    <p id="ed-play-note" class="small" aria-live="polite"></p>
+    <div class="row">
+      <span id="ed-main" class="ed-main"></span>
+      <button id="ed-save" class="btn btn-accent" type="submit">Save ↵</button>
+    </div>
+    <div class="row">
+      <label id="ed-other-label" class="label" for="ed-latin">Gujlish</label><span id="ed-other" class="ed-other"></span>
+      <span class="spacer"></span>
+      <label class="check" id="ed-all-row"><input type="checkbox" id="ed-all" checked><span>All <span id="ed-count"></span> in this talk</span></label>
+      <label class="check"><input type="checkbox" id="ed-remember" checked><span>Remember</span></label>
+      <label class="check" id="ed-always-row" title="Only for words that can’t be right anywhere"><input type="checkbox" id="ed-always"><span>Fix without asking</span></label>
+    </div>
+    <p id="ed-effect" class="small ed-effect" aria-live="polite"></p>
+    <div id="ed-more" class="ed-more" hidden>
+      <div class="ed-extend"><button id="ed-left" class="btn btn-outline btn-sm" type="button">+ word before</button><button id="ed-right" class="btn btn-outline btn-sm" type="button">+ word after</button></div>
+      <div id="ed-suggest" class="chips" aria-label="Gujarati suggestions"></div>
+    </div>
+    <p id="ed-error" class="error" role="alert"></p>
+    <div class="foot">
+      <p class="small">Shift + double-click to add the next word · <button id="ed-more-toggle" class="link-button" type="button" aria-expanded="false" aria-controls="ed-more">More</button></p>
+      <button id="ed-cancel" class="btn btn-sm" type="button">Cancel</button>
+    </div>
+    <input id="ed-gu" lang="gu" autocomplete="off" spellcheck="false" aria-label="Correct Gujarati" placeholder="Correct Gujarati">
+    <input id="ed-latin" autocomplete="off" spellcheck="false" aria-label="Correct Gujlish" placeholder="Type in English letters">
+  </form>
+</div>
+
 <div id="drop-overlay" class="drop-overlay" hidden><p>Drop to add this recording</p></div>
-<div id="editor" class="editor" role="dialog" aria-labelledby="ed-title" hidden>
-  <div class="editor-head"><strong id="ed-title">Fix words</strong><button id="ed-close" class="ed-close" type="button" aria-label="Close">×</button></div>
-  <div id="ed-suggestion" class="ed-suggestion" hidden><span>Your dictionary suggests <b id="ed-suggested" lang="gu"></b> here.</span><button id="ed-dismiss" class="secondary" type="button">Not here, keep as heard</button></div>
-  <p class="heard"><button id="ed-play" class="play" type="button" title="Play these words" aria-label="Play these words">&#9654;</button><span class="muted">Heard</span> <span id="ed-heard" lang="gu"></span> <span id="ed-heard-latin" class="muted"></span></p>
-  <p id="ed-play-note" class="ed-play-note muted" aria-live="polite"></p>
-  <div class="ed-extend"><button id="ed-left" class="secondary" type="button">+ word before</button><button id="ed-right" class="secondary" type="button">+ word after</button></div>
-  <label class="field-label" for="ed-gu">Correct Gujarati</label><input id="ed-gu" lang="gu" autocomplete="off" spellcheck="false">
-  <label class="field-label" for="ed-latin">Correct Gujlish</label><input id="ed-latin" autocomplete="off" spellcheck="false" placeholder="Type in English letters to get Gujarati">
-  <div id="ed-suggest" class="chips" aria-label="Gujarati suggestions"></div>
-  <p id="ed-effect" class="ed-effect" aria-live="polite"></p>
-  <label class="check" id="ed-all-row"><input type="checkbox" id="ed-all" checked><span>Also fix the other <span id="ed-count"></span> in this recording</span></label>
-  <label class="check"><input type="checkbox" id="ed-remember" checked><span>Remember for future recordings</span></label>
-  <label class="check sub" id="ed-always-row"><input type="checkbox" id="ed-always"><span>Fix it in future without asking (only for words that can’t be right anywhere)</span></label>
-  <p id="ed-error" class="ed-error" role="alert"></p>
-  <div class="editor-actions"><button id="ed-cancel" class="secondary" type="button">Cancel</button><button id="ed-save" class="primary" type="button">Replace</button></div>
-</div>
 <dialog id="modal" class="modal" aria-labelledby="modal-title"><h3 id="modal-title"></h3><p id="modal-text"></p><div id="modal-actions" class="modal-actions"></div></dialog>
 </body>
 </html>
