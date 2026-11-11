@@ -128,7 +128,9 @@ async function loadRuns() {
     if (signedOut(response)) return;
     if (response.ok) { runs = await response.json(); renderRuns(); }
   } catch { /* the server may be restarting: try again shortly */ }
-  runsTimer = setTimeout(loadRuns, upload || runs.some(busyRun) ? 3000 : 20000);
+  // Ask again only while something is in progress and the tab is on screen. When idle the list refreshes when you come
+  // back to the page, so an open tab never keeps the hosted server (and its GPU) awake.
+  if (!document.hidden && (upload || runs.some(busyRun))) runsTimer = setTimeout(loadRuns, 3000);
 }
 function mergeRun(job) {
   const run = runs.find(item => item.id === job.id);
@@ -811,11 +813,15 @@ function dictionaryRow(text, detail, forget, rule = null) {
   return row;
 }
 
-// Coming back to the tab: refresh at once rather than waiting for the next timer.
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
+// Coming back to the tab or window: refresh at once, since nothing re-checks while the page is idle or hidden.
+let lastReturn = 0;
+function welcomeBack() {
+  if (document.hidden || Date.now() - lastReturn < 2000) return;  // switching tabs fires both events
+  lastReturn = Date.now();
   loadRuns();
   if (jobId && jobId !== 'upload') { pollFailures = 0; poll(); }
-});
+}
+document.addEventListener('visibilitychange', welcomeBack);
+window.addEventListener('focus', welcomeBack);
 loadDictionary();
 loadRuns().then(() => { const saved = sessionStorage.getItem('asr-job'); select(saved && runs.some(run => run.id === saved) ? saved : null); });
