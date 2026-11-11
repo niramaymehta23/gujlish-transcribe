@@ -1,4 +1,4 @@
-"""Download the models named in GUJLISH_MODELS, the Gujlish model (always: it times words), and the Gujlish
+"""Download the models named in VAANI_MODELS, the Gujlish model (always: it times words), and the Gujlish
 transliteration model, into the image's Hugging Face cache (run during docker build)."""
 
 import os
@@ -20,10 +20,10 @@ secret = Path("/run/secrets/hf_token")
 token = secret.read_text().strip() if secret.exists() else None
 # The Gujlish model is always included: besides being a transcription choice, it times words for the English captions
 # and the word editor's play button (transcriber/speech/align.py), even on a site that offers only Flex.
-offered = [m.strip() for m in os.environ["GUJLISH_MODELS"].split(",") if m.strip()]
+offered = [m.strip() for m in os.environ["VAANI_MODELS"].split(",") if m.strip()]
 for model in dict.fromkeys([*offered, "gujlish"]):
     repo, ignore = REPOS[model]
-    revision = os.environ.get("GUJLISH_FLEX_REVISION") if model == "flex" else None
+    revision = os.environ.get("VAANI_FLEX_REVISION") if model == "flex" else None
     if model == "flex" and not token:
         raise SystemExit("Flex is gated: build with --secret id=hf_token,src=<file holding your Hugging Face token>")
     print(f"Fetching {repo}", flush=True)

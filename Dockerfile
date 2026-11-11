@@ -14,12 +14,12 @@ RUN pip install -r requirements.txt "gunicorn>=23,<24"
 ARG MODELS=gujlish
 # Flex runs Python code from its model repository, so pin a reviewed commit.
 ARG FLEX_REVISION=ecba9bac9013c0340fe814b336897ee51ed80be9
-ENV GUJLISH_MODELS=${MODELS} GUJLISH_FLEX_REVISION=${FLEX_REVISION}
+ENV VAANI_MODELS=${MODELS} VAANI_FLEX_REVISION=${FLEX_REVISION}
 COPY deploy/fetch_models.py deploy/fetch_models.py
 RUN --mount=type=secret,id=hf_token,required=false python deploy/fetch_models.py
 ENV HF_HUB_OFFLINE=1
 
 COPY . .
-ENV GUJLISH_HOSTED=1 GUJLISH_DATA_DIR=/data PORT=8080
+ENV VAANI_HOSTED=1 VAANI_DATA_DIR=/data PORT=8080
 # One worker process: jobs are tracked in memory. Threads serve uploads and progress polling meanwhile.
 CMD exec gunicorn --workers 1 --threads 16 --timeout 0 --bind "0.0.0.0:${PORT}" "web.server:create_app()"

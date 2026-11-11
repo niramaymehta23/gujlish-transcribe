@@ -1,4 +1,4 @@
-# Gujarati Transcriber: implementation report
+# HariSena Vaani Studio: implementation report
 
 **Date:** 14 October 2026  
 **Scope:** Local Gujarati/Gujarati–English CLI, browser workflow, experiment organization, and GitHub preparation.

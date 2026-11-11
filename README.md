@@ -1,6 +1,6 @@
-# Gujarati Transcriber
+# HariSena Vaani Studio
 
-Turn Gujarati and Gujarati–English recordings into text, on your own computer. Optionally, translate the transcript into natural spoken English and get a structured summary, using Google's Gemini (needs your own Gemini API key; see [step 7](#translate-to-english-and-summarize-optional)).
+Turn Gujarati and Gujarati–English talks into text on your own computer, then into everything you publish: Gujlish, natural spoken English, timed subtitles, a summary, YouTube details and short clips. Transcription runs on your computer; the English, summary and YouTube steps use Google's Gemini (needs your own Gemini API key; see [step 7](#translate-to-english-and-summarize-optional)).
 
 - **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
 - **Gujlish too.** The same transcript in Latin letters ("kem cho"), word for word, made on your computer with AI4Bharat's IndicXlit.
@@ -50,8 +50,8 @@ sudo apt update && sudo apt install python3 python3-venv ffmpeg git
 ### 2. Download this project
 
 ```bash
-git clone https://github.com/niramaymehta23/gujlish-transcribe.git
-cd gujlish-transcribe
+git clone https://github.com/niramaymehta23/harisena-vaani-studio.git
+cd harisena-vaani-studio
 ```
 
 ### 3. Create a Python environment and install the packages
@@ -240,7 +240,7 @@ Finding clips, storyboards and Remotion videos run in Claude Code on your own co
 ## Project layout
 
 ```text
-gujlish-transcribe/
+harisena-vaani-studio/
 ├── app.py              # start the web app: python app.py
 ├── transcriber/        # all the Python code
 │   ├── speech/         #   recognising Gujarati: models, audio chunking, guards, word fixes, Gujlish

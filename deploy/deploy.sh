@@ -16,14 +16,14 @@ account="${number}-compute@developer.gserviceaccount.com"  # runs the website an
 # wrote, so the mount must not cache file listings.
 volume="name=data,type=cloud-storage,bucket=$BUCKET,mount-options=metadata-cache-ttl-secs=0"
 
-secrets="GUJLISH_SECRET_KEY=gujlish-secret-key:latest"
+secrets="VAANI_SECRET_KEY=gujlish-secret-key:latest"
 if gcloud secrets describe gujlish-password --project "$PROJECT_ID" >/dev/null 2>&1; then
-  secrets="$secrets,GUJLISH_ACCESS_PASSWORD=gujlish-password:latest"
+  secrets="$secrets,VAANI_ACCESS_PASSWORD=gujlish-password:latest"
 fi
-env_vars="GUJLISH_MODELS=$MODELS,GUJLISH_RETENTION_HOURS=0"  # 0 = keep recordings and results
+env_vars="VAANI_MODELS=$MODELS,VAANI_RETENTION_HOURS=0"  # 0 = keep recordings and results
 if gcloud secrets describe gujlish-gemini-key --project "$PROJECT_ID" >/dev/null 2>&1; then
   secrets="$secrets,GEMINI_API_KEY=gujlish-gemini-key:latest"
-  env_vars="$env_vars,GUJLISH_ALLOW_GEMINI=1"
+  env_vars="$env_vars,VAANI_ALLOW_GEMINI=1"
 fi
 
 gcloud builds submit --project "$PROJECT_ID" --region "$REGION" --config deploy/cloudbuild.yaml \
@@ -50,7 +50,7 @@ gcloud run deploy "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --image 
   --min-instances 0 --max-instances 1 --concurrency 40 --timeout 3600 \
   --allow-unauthenticated \
   --add-volume "$volume" --add-volume-mount volume=data,mount-path=/data \
-  --set-env-vars "$env_vars,GUJLISH_GPU_JOB=$GPU_JOB,GUJLISH_PROJECT=$PROJECT_ID,GUJLISH_REGION=$REGION,GUJLISH_GPU_HOURS_PER_MONTH=$GPU_HOURS_PER_MONTH,GUJLISH_GPU_POUNDS_PER_HOUR=$GPU_POUNDS_PER_HOUR" \
+  --set-env-vars "$env_vars,VAANI_GPU_JOB=$GPU_JOB,VAANI_PROJECT=$PROJECT_ID,VAANI_REGION=$REGION,VAANI_GPU_HOURS_PER_MONTH=$GPU_HOURS_PER_MONTH,VAANI_GPU_POUNDS_PER_HOUR=$GPU_POUNDS_PER_HOUR" \
   --set-secrets "$secrets" \
   --service-account "$account"
 

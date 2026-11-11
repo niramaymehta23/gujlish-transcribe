@@ -42,8 +42,8 @@ class FlexBackend:
         from huggingface_hub import snapshot_download
 
         # The Flex wrapper is Python code from the model repository and is executed below. Set
-        # GUJLISH_FLEX_REVISION to a commit hash you have reviewed to stop upstream changes from altering behavior.
-        revision = os.environ.get("GUJLISH_FLEX_REVISION") or None
+        # VAANI_FLEX_REVISION to a commit hash you have reviewed to stop upstream changes from altering behavior.
+        revision = os.environ.get("VAANI_FLEX_REVISION") or None
         model_dir = Path(snapshot_download(FLEX_REPO, ignore_patterns=["nemo/*"], revision=revision))
         sys.path.insert(0, str(model_dir))
         try:

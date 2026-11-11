@@ -77,8 +77,8 @@ class RunRemoteTest(unittest.TestCase):
         self.assertEqual((code, logs), (0, ["Done:"]))
         self.assertEqual([e["stage"] for e in self.events], ["loading", "transcribing", "transcribing", "complete"])
         env, timeout = self.jobs.started[0]
-        self.assertEqual(json.loads(env["GUJLISH_JOB_COMMAND"])[1], "scripts/transcribe.py")
-        self.assertEqual(env["GUJLISH_JOB_EVENTS"], str(events_file(self.run_dir, "transcribe")))
+        self.assertEqual(json.loads(env["VAANI_JOB_COMMAND"])[1], "scripts/transcribe.py")
+        self.assertEqual(env["VAANI_JOB_EVENTS"], str(events_file(self.run_dir, "transcribe")))
         self.assertEqual(timeout, 1800)
         self.assertEqual(self.recorded, [EXECUTION, None])  # kept in the run's state while it runs, then cleared
         self.assertEqual(self.finished, [EXECUTION])
@@ -156,9 +156,9 @@ class JobEntryPointTest(unittest.TestCase):
             run_dir = Path(temp) / "transcripts" / "talk" / "flex-mixed" / "20261111-120000-000001"
             run_dir.mkdir(parents=True)
             worker = 'print(\'ASR_EVENT \' + \'{"stage": "loading", "device": "cuda"}\'); print(\'Done:\')'
-            env = {**os.environ, "GUJLISH_DATA_DIR": temp, "CLOUD_RUN_EXECUTION": "gpu-xyz",
-                   "GUJLISH_JOB_COMMAND": json.dumps([sys.executable, "-c", worker]),
-                   "GUJLISH_JOB_EVENTS": str(events_file(run_dir, "transcribe"))}  # fmt: skip
+            env = {**os.environ, "VAANI_DATA_DIR": temp, "CLOUD_RUN_EXECUTION": "gpu-xyz",
+                   "VAANI_JOB_COMMAND": json.dumps([sys.executable, "-c", worker]),
+                   "VAANI_JOB_EVENTS": str(events_file(run_dir, "transcribe"))}  # fmt: skip
             script = Path(__file__).resolve().parents[1] / "scripts" / "run_job.py"
             result = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -290,7 +290,7 @@ class ServerGpuJobTest(unittest.TestCase):
         self.assertEqual(app.test_client().get("/api/usage").json, {"gpu": False})
 
     def test_a_gpu_job_is_used_only_on_cloud_run(self):
-        env = {"GUJLISH_GPU_JOB": "gpu", "GUJLISH_PROJECT": "p", "GUJLISH_REGION": "r"}
+        env = {"VAANI_GPU_JOB": "gpu", "VAANI_PROJECT": "p", "VAANI_REGION": "r"}
         with patch.dict("os.environ", env), patch("builtins.print"):
             self.assertEqual(Settings.from_env().gpu_job, "")  # e.g. python app.py on a Mac
         with patch.dict("os.environ", {**env, "K_SERVICE": "gujarati-transcriber"}):

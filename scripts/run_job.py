@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Entry point of the hosted site's GPU job (Cloud Run job, same image as the website). See web/cloudjobs.py.
 
-Runs the worker command the website passed in GUJLISH_JOB_COMMAND, printing its output to the job's logs, and keeps a
-small progress file (GUJLISH_JOB_EVENTS) in the run's folder on the shared storage bucket up to date for the website.
+Runs the worker command the website passed in VAANI_JOB_COMMAND, printing its output to the job's logs, and keeps a
+small progress file (VAANI_JOB_EVENTS) in the run's folder on the shared storage bucket up to date for the website.
 It also keeps this run's GPU usage file current, so a run that is killed or times out is still counted. When Cloud
 Run cancels the execution (Pause, Stop or Delete on the site), the worker is stopped and its progress kept.
 """
@@ -28,8 +28,8 @@ USAGE_EVERY_SECONDS = 30.0
 
 
 def main() -> int:
-    command = json.loads(os.environ["GUJLISH_JOB_COMMAND"])
-    progress = Path(os.environ["GUJLISH_JOB_EVENTS"])
+    command = json.loads(os.environ["VAANI_JOB_COMMAND"])
+    progress = Path(os.environ["VAANI_JOB_EVENTS"])
     execution = os.environ.get("CLOUD_RUN_EXECUTION", f"local-{int(time.time())}")
     run = progress.parent.name
     step = progress.stem.removeprefix(".job-")

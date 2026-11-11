@@ -177,7 +177,7 @@ def run_remote(
             pass
     if execution is None:
         progress.unlink(missing_ok=True)
-        env = {"GUJLISH_JOB_COMMAND": json.dumps(command), "GUJLISH_JOB_EVENTS": str(progress)}
+        env = {"VAANI_JOB_COMMAND": json.dumps(command), "VAANI_JOB_EVENTS": str(progress)}
         execution = jobs.start(env, timeout_seconds)
     if on_execution:
         on_execution(execution)
