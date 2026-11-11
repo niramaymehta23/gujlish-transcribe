@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Build the image on Google Cloud and deploy it to Cloud Run with one L4 GPU that scales to zero when idle.
+# Build the image on Google Cloud, then deploy:
+#   - the GPU job ($GPU_JOB): transcribes one recording on an L4 GPU and exits. It runs only when the website starts it,
+#     so the GPU is billed only while a recording is being transcribed.
+#   - the website ($SERVICE): CPU only, scales to zero when nobody uses it. No tab, visitor or bot can bill a GPU.
+# Then it applies the cost guardrails (deploy/guardrails.sh) and checks that the website has no GPU.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source deploy/config.sh
 [[ "$PROJECT_ID" == "your-project-id" ]] && { echo "Set PROJECT_ID in deploy/config.sh first."; exit 1; }
+
 tag="$IMAGE:$(git rev-parse --short HEAD)"
+number=$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')
+account="${number}-compute@developer.gserviceaccount.com"  # runs the website and the job
+# The bucket holds recordings, transcripts and the GPU job's progress files. Both sides read what the other just
+# wrote, so the mount must not cache file listings.
+volume="name=data,type=cloud-storage,bucket=$BUCKET,mount-options=metadata-cache-ttl-secs=0"
+
 secrets="GUJLISH_SECRET_KEY=gujlish-secret-key:latest"
 if gcloud secrets describe gujlish-password --project "$PROJECT_ID" >/dev/null 2>&1; then
   secrets="$secrets,GUJLISH_ACCESS_PASSWORD=gujlish-password:latest"
@@ -16,14 +27,42 @@ if gcloud secrets describe gujlish-gemini-key --project "$PROJECT_ID" >/dev/null
 fi
 
 gcloud builds submit --project "$PROJECT_ID" --region "$REGION" --config deploy/cloudbuild.yaml \
-  --substitutions "_IMAGE=$tag,_MODELS=$MODELS" .
+  --substitutions "_IMAGE=$tag,_CACHE=$IMAGE:latest,_MODELS=$MODELS" .
 
-# --max-instances 1: one GPU at most, so the bill can't multiply and there is a single transcription queue.
-# --no-cpu-throttling: transcription runs in the background between browser requests (GPUs require it anyway).
+# The GPU job. One task, no retries (a failed run waits for you to resume it), and a hard time limit; the website
+# sets a shorter one for each recording from its length.
+gcloud run jobs deploy "$GPU_JOB" --project "$PROJECT_ID" --region "$REGION" --image "$tag" \
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy --cpu 4 --memory 16Gi \
+  --tasks 1 --parallelism 1 --max-retries 0 --task-timeout 3h \
+  --command python --args scripts/run_job.py \
+  --add-volume "$volume" --add-volume-mount volume=data,mount-path=/data \
+  --set-env-vars "$env_vars" \
+  --service-account "$account"
+# The website starts and cancels executions of this job (and nothing else).
+gcloud run jobs add-iam-policy-binding "$GPU_JOB" --project "$PROJECT_ID" --region "$REGION" \
+  --member "serviceAccount:$account" --role roles/run.developer >/dev/null
+
+# The website. --gpu 0 removes the GPU the service used to have. --no-cpu-throttling lets Gujlish, translation and
+# captions finish between page requests; it costs CPU only, and only while the site is up (it scales to zero).
+# --max-instances 1: runs are tracked in memory, so there is a single copy of the site.
 gcloud run deploy "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --image "$tag" \
-  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy --cpu 4 --memory 16Gi --no-cpu-throttling \
+  --gpu 0 --cpu "$WEB_CPU" --memory "$WEB_MEMORY" --no-cpu-throttling \
   --min-instances 0 --max-instances 1 --concurrency 40 --timeout 3600 \
   --allow-unauthenticated \
-  --add-volume name=data,type=cloud-storage,bucket="$BUCKET" --add-volume-mount volume=data,mount-path=/data \
-  --set-env-vars "$env_vars" \
-  --set-secrets "$secrets"
+  --add-volume "$volume" --add-volume-mount volume=data,mount-path=/data \
+  --set-env-vars "$env_vars,GUJLISH_GPU_JOB=$GPU_JOB,GUJLISH_PROJECT=$PROJECT_ID,GUJLISH_REGION=$REGION,GUJLISH_GPU_HOURS_PER_MONTH=$GPU_HOURS_PER_MONTH,GUJLISH_GPU_POUNDS_PER_HOUR=$GPU_POUNDS_PER_HOUR" \
+  --set-secrets "$secrets" \
+  --service-account "$account"
+
+# Refuse to leave a website with a GPU running: that is what billed £23 of idle GPU time in November 2026.
+gpus=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" \
+  --format 'value(spec.template.spec.containers[0].resources.limits."nvidia.com/gpu")')
+if [[ -n "$gpus" && "$gpus" != "0" ]]; then
+  echo "ERROR: the website still has a GPU ($gpus). Taking it offline until this is fixed." >&2
+  gcloud run services remove-iam-policy-binding "$SERVICE" --project "$PROJECT_ID" --region "$REGION" \
+    --member allUsers --role roles/run.invoker >/dev/null || true
+  exit 1
+fi
+echo "Website has no GPU. Transcriptions run on the $GPU_JOB job."
+
+deploy/guardrails.sh

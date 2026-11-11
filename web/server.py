@@ -50,6 +50,8 @@ from transcriber.speech.dictionary import save as save_dictionary
 from transcriber.speech.edits import load_gujlish, matches, replace_words, save_transcript
 from transcriber.speech.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
 from transcriber.speech.postprocess import drop_cut_stop
+from web import usage
+from web.cloudjobs import CloudRunJobs, RemoteRun, run_remote
 from web.documents import markdown_docx, transcript_docx
 from web.recordings import FINGERPRINT, fingerprint, fingerprints
 from web.recordings import find as find_recording
@@ -69,6 +71,10 @@ ROUGH_PAD = 1.0  # and around words whose times are estimated
 LEFTOVER_SECONDS = 3600  # unused recordings and empty run folders younger than this may belong to an upload under way
 EVENT_PREFIX = "ASR_EVENT "
 STOPPED = "Stopped. Start it again to continue where it left off."
+GPU_LIMIT_MESSAGE = (
+    "This month's GPU limit ({hours:g} hours) is used up, so no new transcriptions can start. "
+    "It resets on the 1st (UTC), or the site owner can raise it."
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,9 @@ def run_worker(command: list[str], on_event, on_start=None) -> tuple[int, list[s
 
 def stop_worker(worker) -> None:
     """Stop a worker and everything it started; kill them if they are still running after a grace period."""
+    if isinstance(worker, RemoteRun):  # a Cloud Run GPU job: cancelling it stops the worker inside
+        Thread(target=worker.stop, daemon=True).start()
+        return
 
     def send(sig):
         try:
@@ -220,8 +229,17 @@ def stopped_at(job: dict) -> str:
     return f"{fmt_time(done)} of {fmt_time(total)}" if total else fmt_time(done)
 
 
-def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
+def gpu_timeout(duration: float | None) -> int:
+    """Longest a GPU job may run for a recording: start-up and model loading, plus the recording's own length
+    (transcription runs well faster than real time), within 30 minutes to 3 hours. A stuck job cannot run on."""
+    return int(min(3 * 3600, max(30 * 60, 20 * 60 + (duration or 3600))))
+
+
+def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None) -> Flask:
     settings = settings or Settings.from_env()
+    # Hosted with a GPU job: transcription runs there and this website needs no GPU (web/cloudjobs.py).
+    if gpu_jobs is None and settings.gpu_job:
+        gpu_jobs = CloudRunJobs(settings.project, settings.region, settings.gpu_job)
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = int(settings.max_upload_mb * 1024**2) + 1024**2
     app.config.update(
@@ -252,6 +270,28 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     recovered = [False]
     app.extensions["asr_jobs"] = jobs
     app.extensions["asr_settings"] = settings
+
+    def gpu_limit_reached() -> bool:
+        """True once this month's GPU job time has reached the limit (only when transcription runs on a GPU job)."""
+        if gpu_jobs is None or not settings.gpu_hours_per_month:
+            return False
+        return usage.month_total()["seconds"] >= settings.gpu_hours_per_month * 3600
+
+    def gpu_job_running(execution: str) -> bool:
+        if gpu_jobs is None:
+            return False
+        try:
+            return not gpu_jobs.status(execution)["done"]
+        except (OSError, ValueError, KeyError):
+            return False
+
+    def log_gpu(execution: str, status: dict, run_dir: Path) -> None:
+        """Record the GPU time Cloud Run reports for a finished job (what Google bills), over the job's own estimate."""
+        if status.get("started") and status.get("ended"):
+            try:
+                usage.record(execution, status["started"], status["ended"], run=Path(run_dir).name)
+            except OSError:
+                pass  # the job's own record stays
 
     def owner_tag() -> str:
         """A per-browser id kept in the signed session cookie; hosted runs are visible only to their owner."""
@@ -458,7 +498,29 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             elif event["stage"] == "loading":
                 change(device=event["device"])
 
-        code, logs = run_worker(command, on_event, lambda worker: started_worker(job_id, "transcribe", worker))
+        on_start = lambda worker: started_worker(job_id, "transcribe", worker)  # noqa: E731
+        if gpu_jobs is None:
+            code, logs = run_worker(command, on_event, on_start)
+        elif gpu_limit_reached():
+            code, logs = 1, [f"Error: {GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month)}"]
+        else:
+            try:
+                code, logs = run_remote(
+                    gpu_jobs,
+                    command,
+                    on_event,
+                    on_start,
+                    run_dir=run_dir,
+                    step="transcribe",
+                    timeout_seconds=gpu_timeout(job.get("duration")),
+                    saved=read_meta(run_dir).get("execution"),
+                    on_execution=lambda name: update_meta(
+                        run_dir, lambda meta: meta.update(execution=name) if name else meta.pop("execution", None)
+                    ),
+                    on_finish=lambda name, status: log_gpu(name, status, run_dir),
+                )
+            except (OSError, ValueError, RuntimeError) as error:
+                code, logs = 1, [f"Error: Could not start the transcription job ({error})."]
         reason = finished_worker(job_id, "transcribe", token)
         finished = not code and job.get("txt")
         if reason == "delete":
@@ -607,12 +669,28 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             merge_recordings()
         for run_dir in run_dirs():
             meta = read_meta(run_dir)
+            if meta.get("execution") and (meta.get("paused") or meta.get("failed")):
+                # Paused or failed, but its GPU job may still be running (this website restarted mid-stop): end it.
+                if gpu_job_running(meta["execution"]):
+                    Thread(target=RemoteRun(gpu_jobs, meta["execution"]).stop, daemon=True).start()
+                drop_meta(run_dir, "execution")
+                continue
             unfinished = meta.get("source") and not meta.get("paused") and not meta.get("failed")
             if not meta.get("pending") and not unfinished:
                 continue
             with lock:
                 job = jobs.get(run_id(run_dir)) or restore(run_id(run_dir))
             if not job:
+                continue
+            if meta.get("execution") and job["status"] == "complete":
+                # Its GPU job finished while this website was asleep: carry on as if it had just finished here.
+                drop_meta(run_dir, "execution", "resumes", "failed", "paused")
+                if not stage_output(job["json"], "gujlish").exists():
+                    queue_stages(job["id"], ("gujlish",))
+                continue
+            if job["status"] == "error" and meta.get("execution") and gpu_job_running(meta["execution"]):
+                # Still transcribing on the GPU job: follow it again. Not a restart of the work, so not counted.
+                queue_transcription(job["id"], "Transcribing")
                 continue
             transcribe = job["status"] == "error"
             pending = [key for key in meta.get("pending", []) if key in STAGES] if job["status"] == "complete" else []
@@ -788,6 +866,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         if not filename:
             return jsonify(error="Choose a file with a valid filename."), 400
         owner = owner_tag()
+        if gpu_limit_reached():
+            return jsonify(error=GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month)), 429
         if settings.hosted:
             with lock:
                 if any(job.get("owner") == owner and job["status"] in ACTIVE for job in jobs.values()):
@@ -914,6 +994,14 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         # Whether translation/summaries can run. The key itself stays in the server's environment.
         return jsonify(hosted=settings.hosted, gemini=gemini_ready())
 
+    @app.get("/api/usage")
+    def gpu_usage():
+        """This month's GPU job time and its estimated cost, for the page. Empty when there is no GPU job."""
+        if gpu_jobs is None:
+            return jsonify(gpu=False)
+        summary = usage.summary(settings.gpu_hours_per_month, settings.gpu_pounds_per_hour)
+        return jsonify(gpu=True, **summary)
+
     def start_stage(job_id, *keys, engine="auto"):
         with lock:
             find_job(job_id)
@@ -998,6 +1086,10 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 stopping[(job_id, "transcribe")] = "pause"
                 job["message"] = "Pausing…"
                 worker = workers.get((job_id, "transcribe"))  # not started yet: it is stopped as soon as it starts
+        if isinstance(worker, RemoteRun):
+            # Saved at once: if this website restarts before the GPU job has stopped, the pause still holds and
+            # recover() cancels the job instead of following it again.
+            update_meta(job["run_dir"], lambda meta: meta.update(paused=True))
         if worker:
             stop_worker(worker)
         elif job["status"] == "paused":
@@ -1011,6 +1103,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             job = find_job(job_id)
             if job["status"] not in {"error", "paused"}:
                 return jsonify(error="Only a paused or stopped recording can be resumed."), 409
+        if gpu_limit_reached():
+            return jsonify(error=GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month)), 429
         drop_meta(job["run_dir"], "paused", "failed", "resumes")
         queue_transcription(job_id, "Queued to continue from where it stopped")
         return jsonify(id=job_id), 202
