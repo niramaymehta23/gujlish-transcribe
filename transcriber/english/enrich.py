@@ -6,11 +6,13 @@ import argparse
 import json
 from pathlib import Path
 
+from transcriber.english.captions import run_captions
 from transcriber.english.llm import DEFAULT_GEMINI_MODEL, GeminiLLM, LLMError
 from transcriber.english.publish_common import read_text_file
 from transcriber.english.summarize import run_summary
 from transcriber.english.translate import STYLES, load_glossary, run_translation
 from transcriber.english.youtube import run_youtube
+from transcriber.files.storage import RECORDINGS, stage_paths
 
 STAGE_ERRORS = (ImportError, OSError, RuntimeError, ValueError, LLMError, json.JSONDecodeError)
 
@@ -34,6 +36,11 @@ def add_llm_arguments(parser: argparse.ArgumentParser, *, translation: bool = Tr
         group.add_argument("--style-note", default="", help='Extra context, e.g. "a talk to a large live audience"')
         group.add_argument("--glossary", type=Path, help='JSON {"term": "English rendering"} for names and terms')
         group.add_argument("--limit", type=int, help="Translate only the first N segments (to compare models quickly)")
+        group.add_argument(
+            "--no-captions",
+            action="store_true",
+            help="Keep the English subtitles broken chunk by chunk instead of re-breaking and re-timing them",
+        )
     group.add_argument(
         "--channel",
         type=Path,
@@ -63,6 +70,35 @@ def resolve_transcript(path: Path) -> Path:
             return found[0]
         raise RuntimeError(f"Expected one transcript JSON in {path}, found {len(found)}; pass the file itself")
     raise FileNotFoundError(path)
+
+
+RUN_FILE = ".run.json"  # the web app's state file in a run folder (web.server.RUN_FILE)
+
+
+def find_recording(transcript_json: Path) -> Path | None:
+    """The recording a transcript was made from: the stored copy the web app's run file names, else
+    data/recordings/<source name>. None when neither is there."""
+    transcript_json = Path(transcript_json)
+    names = []
+    try:
+        meta = json.loads((transcript_json.parent / RUN_FILE).read_text(encoding="utf-8"))
+        names += [meta.get("recording"), meta.get("name")]
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        names.append(json.loads(transcript_json.read_text(encoding="utf-8")).get("source"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    for name in filter(None, names):
+        path = RECORDINGS / Path(str(name)).name
+        if path.is_file():
+            return path
+    return None
+
+
+def caption_audio(transcript_json: Path, args) -> Path | None:
+    audio = getattr(args, "audio", None)
+    return Path(audio).expanduser() if audio else find_recording(transcript_json)
 
 
 def summary_llm_for(args):
@@ -97,9 +133,25 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
             progress=progress,
         )
         outputs += [paths["translation_txt"], paths["translation_srt"], paths["bilingual"], paths["translation_json"]]
+        if not getattr(args, "no_captions", False) and getattr(args, "limit", None) is None:
+            print("Re-breaking and timing the English captions", flush=True)
+            paths = run_captions(
+                transcript_json,
+                llm,
+                audio=caption_audio(transcript_json, args),
+                label=label,
+                reset=getattr(args, "reset", False),
+                progress=progress,
+            )
+            outputs.append(paths["captions_json"])
         if progress:
+            translated = stage_paths(transcript_json, label)
             progress(
-                {"stage": "complete", "txt": str(paths["translation_txt"]), "json": str(paths["translation_json"])}
+                {
+                    "stage": "complete",
+                    "txt": str(translated["translation_txt"]),
+                    "json": str(translated["translation_json"]),
+                }
             )
     if summarize:
         llm = summary_llm_for(args)
@@ -126,7 +178,7 @@ def _progress_printer(as_json: bool):
     def show(event: dict) -> None:
         if as_json:
             print("ASR_EVENT " + json.dumps(event), flush=True)
-        elif event["stage"] in {"translating", "summarizing", "describing"}:
+        elif event["stage"] in {"translating", "aligning", "captioning", "summarizing", "describing"}:
             print(f"  {event['stage']} {event['done']}/{event['total']}", flush=True)
 
     return show
@@ -154,10 +206,62 @@ def translate_main() -> None:
         "transcript", type=Path, help="The <name>.<model>.json file of a transcription run, or its folder"
     )
     add_llm_arguments(parser, summary=False)
+    parser.add_argument(
+        "--audio",
+        type=Path,
+        help="The recording, to time the English captions to the speech (default: the run's recording in "
+        "data/recordings, if there)",
+    )
     parser.add_argument("--reset", action="store_true", help="Discard an interrupted translation and start again")
     parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(summary_model=None)
     _run(parser, translate=True, summarize=False)
+
+
+def captions_main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Re-break the English subtitles of a translated recording into whole phrases and time them to "
+        "when each phrase is said. The English words are not changed."
+    )
+    parser.add_argument(
+        "transcript", type=Path, help="The <name>.<model>.json file of a transcription run, or its folder"
+    )
+    parser.add_argument(
+        "--audio",
+        type=Path,
+        help="The recording, to time captions to the speech (default: the run's recording in data/recordings, if "
+        "there); without it, times are shared out over each chunk",
+    )
+    parser.add_argument("--llm-model", help=f"Gemini model that chooses the breaks (default {DEFAULT_GEMINI_MODEL})")
+    parser.add_argument(
+        "--plain", action="store_true", help="Break by punctuation and length only, without Gemini (no key needed)"
+    )
+    parser.add_argument("--label", help="The --label the translation was made with, if any")
+    parser.add_argument("--reset", action="store_true", help="Ask Gemini again for every part, ignoring saved breaks")
+    parser.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    try:
+        transcript = resolve_transcript(args.transcript)
+        llm = None if args.plain else GeminiLLM(args.llm_model)
+        if llm:
+            llm.prepare()
+            print(f"Choosing caption breaks with {llm.describe()}", flush=True)
+        audio = caption_audio(transcript, args)
+        if audio:
+            print(f"Timing captions to the speech in {audio.name}", flush=True)
+        paths = run_captions(
+            transcript,
+            llm,
+            audio=audio,
+            label=args.label,
+            reset=args.reset,
+            progress=_progress_printer(args.progress_json),
+        )
+    except STAGE_ERRORS as error:
+        parser.exit(1, f"Error: {error}\n")
+    print("Done:")
+    for output in paths.values():
+        print(f"  {output}")
 
 
 def summarize_main() -> None:

@@ -2,11 +2,11 @@ const $ = id => document.getElementById(id);
 // runs: the sidebar list. jobId: the run on screen ('upload' while a file is uploading). current: its finished transcript.
 let runs = [], jobId = null, shown = null, current = null, upload = null;
 let pollTimer = null, runsTimer = null, pollFailures = 0, noticeTimer = null;
-let renderedFor = null, renderedRev = null, caps = null, tab = 'transcript', stageNotice = '';
+let renderedFor = null, renderedRev = null, caps = null, tab = 'transcript', stageNotice = '', stageAction = 'english';
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
 const TABS = ['transcript', 'gujlish', 'translation', 'summary'];
 const WORD_TABS = ['transcript', 'gujlish'];
-const STAGE_KEYS = ['gujlish', 'translation', 'summary'];
+const STAGE_KEYS = ['gujlish', 'translation', 'captions', 'summary'];
 const ACTIVE = ['queued', 'loading', 'transcribing'];
 const STOPPED = 'Stopped. Start it again to continue where it left off.';  // web.server.STOPPED
 const HOSTED = document.body.dataset.hosted === '1';
@@ -91,7 +91,7 @@ function runBadge(run) {
   if (run.status === 'transcribing') return [`Transcribing${percent}`, 'busy'];
   if (run.status === 'paused') return ['Paused', 'paused'];
   if (run.status === 'error') return ['Stopped', 'error'];
-  for (const [key, verb] of [['translation', 'Translating'], ['summary', 'Writing summary'], ['gujlish', 'Gujlish']]) {
+  for (const [key, verb] of [['translation', 'Translating'], ['captions', 'Timing captions'], ['summary', 'Writing summary'], ['gujlish', 'Gujlish']]) {
     const state = run[key];
     if (running(state)) return [state.status === 'queued' ? `${verb} soon` : `${verb}${state.progress != null ? ` ${state.progress}%` : ''}`, 'busy'];
   }
@@ -462,19 +462,23 @@ function updateStageBox() {
     if (['idle', 'error'].includes(state.status) || stale) label = 'Write Gujlish';
     alt = gemini && !running(state);
   } else {
-    const translation = stageState('translation'), summary = stageState('summary');
-    state = running(translation) || translation.status === 'error' ? translation : summary;
+    const translation = stageState('translation'), captions = stageState('captions'), summary = stageState('summary');
+    state = [translation, captions].find(s => running(s) || s.status === 'error') || summary;
     const stale = Boolean(current.english_stale || current.summary_stale);
-    const done = translation.status === 'complete' && summary.status === 'complete';
+    // Only the subtitles are behind: a translation made before captions were timed, or whose timing stopped.
+    const captionsOnly = !stale && translation.status === 'complete' && summary.status === 'complete' && Boolean(current.captions_stale);
+    const done = translation.status === 'complete' && summary.status === 'complete' && !current.captions_stale;
     explain = current.youtube_missing && !current.english_stale ? 'This summary was made before YouTube titles and descriptions were added. Updating rewrites it with them.'
-      : stale ? 'You’ve fixed words since this English was made. Updating re-translates only the lines you changed, then rewrites the summary and YouTube details.'
-      : done ? 'English, summary and YouTube details are up to date with your fixes.'
-      : 'Fix the words first. Then this translates the Gujarati into natural spoken English that keeps the speaker’s tone, then writes the summary, YouTube title and description.';
-    label = stale ? 'Update English, summary & YouTube' : done ? 'Run again' : 'Translate & write summary';
+      : stale ? 'You’ve fixed words since this English was made. Updating re-translates only the lines you changed, then re-times the subtitles and rewrites the summary and YouTube details.'
+      : captionsOnly ? 'The English subtitles aren’t timed to the speech yet. This breaks them into whole phrases and shows each one when it’s said; the English words stay the same.'
+      : done ? 'English, subtitles, summary and YouTube details are up to date with your fixes.'
+      : 'Fix the words first. Then this translates the Gujarati into natural spoken English that keeps the speaker’s tone, times the subtitles to the speech, then writes the summary, YouTube title and description.';
+    label = stale ? 'Update English, summary & YouTube' : captionsOnly ? 'Time the subtitles' : done ? 'Run again' : 'Translate & write summary';
+    stageAction = captionsOnly ? 'captions' : 'english';
     if (!gemini) { label = null; unavailable = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate and summarize, set GEMINI_API_KEY in the terminal and restart the app (see the README).'; }
   }
-  const busy = running(state) || (key === 'english' && (running(stageState('translation')) || running(stageState('summary'))));
-  box.classList.toggle('compact', !busy && key === 'english' && Boolean(current.translation_text) && !current.english_stale && !current.summary_stale);
+  const busy = running(state) || (key === 'english' && ['translation', 'captions', 'summary'].some(k => running(stageState(k))));
+  box.classList.toggle('compact', !busy && key === 'english' && Boolean(current.translation_text) && !current.english_stale && !current.summary_stale && !current.captions_stale);
   $('stage-explain').textContent = explain;
   $('llm-note').hidden = key !== 'english' || !gemini || busy;
   $('stage-button').hidden = !label || busy; $('stage-button').textContent = label || '';
@@ -547,7 +551,7 @@ async function startStage(path, body) {
   } catch { stageNotice = `Could not reach ${SERVER}.`; updateStageBox(); }
   finally { $('stage-button').disabled = false; $('stage-alt').disabled = false; }
 }
-$('stage-button').addEventListener('click', () => startStage(stageBoxKey() === 'gujlish' ? 'gujlish' : 'english'));
+$('stage-button').addEventListener('click', () => startStage(stageBoxKey() === 'gujlish' ? 'gujlish' : stageAction));
 $('stage-alt').addEventListener('click', () => startStage('gujlish', { engine: 'gemini' }));
 $('stage-stop').addEventListener('click', () => act('stop', { stage: stageBoxKey() === 'gujlish' ? 'gujlish' : 'english' }));
 for (const [id, field, label] of [['copy-title', 'title', 'Copy YouTube title'], ['copy-description', 'description', 'Copy YouTube description']]) {

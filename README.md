@@ -199,9 +199,12 @@ Fix the words first, then open the **English** or **Summary & YouTube** tab and 
 python scripts/transcribe.py data/recordings/talk.m4a flex --translate --summarize     # all in one go
 python scripts/translate.py data/transcripts/talk/flex-mixed/<date-time>/             # translate an existing run
 python scripts/summarize.py data/transcripts/talk/flex-mixed/<date-time>/             # then summarize it
+python scripts/captions.py data/transcripts/talk/flex-mixed/<date-time>/              # re-time older English subtitles
 ```
 
 Results are saved next to the transcript: `talk.flex.en.txt` (English), `talk.flex.en.srt` (English subtitles), `talk.flex.bilingual.md` (Gujarati and English side by side) and `talk.flex.summary.md`.
+
+**English subtitles timed to the speech.** Right after translating, the English subtitles are re-broken into whole phrases and timed to when each phrase is said; the English words themselves never change. The recording is lined up word by word with the transcript, on your computer, using the Gujlish model (downloaded the first time, about 1.2 GB; roughly a minute or two for an hour of audio), so a caption no longer appears during a pause or before it is said. Gemini then reads a few minutes of English at a time and decides which words belong in the same caption, so a phrase is no longer split across two captions, and long sentences are split at a natural break (two lines of at most 42 characters). The result is `talk.flex.en.srt`, with each caption's times and words in `talk.flex.en.captions.json`; the older chunk-by-chunk subtitles stay in `talk.flex.en.unsplit.srt`. Add `--no-captions` to skip this, or run `scripts/captions.py` on an existing run (`--plain` breaks by punctuation only, without Gemini; `--audio FILE` if the recording is not in `data/recordings/`). In the app, a translation made before this step shows **Time the subtitles**.
 
 Useful options: `--tone faithful` for a closer, plainer translation; `--style-note "a teacher speaking to students"` to describe the setting; `--glossary examples/glossary.json` to fix how names and terms are translated; `--llm-model <gemini-model>` to use a different Gemini model; `--limit 15 --label test` to try settings on the first 15 segments without touching the full output.
 

@@ -106,12 +106,21 @@ def segment_cues(segment: dict) -> list[tuple[float, float, str]]:
     return cues
 
 
-def to_srt(segments: list[dict]) -> str:
+def cue_groups(words: list[str]) -> list[list[int]]:
+    """Indexes of `words` grouped into cues that fit on screen, broken at the best places (see _groups)."""
+    return _groups(words)
+
+
+def cues_srt(cues) -> str:
+    """SubRip text for (start, end, text) cues, each wrapped onto at most two lines."""
     blocks = []
-    for segment in segments:
-        for start, end, text in segment_cues(segment):
-            blocks.append(f"{len(blocks) + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
+    for start, end, text in cues:
+        blocks.append(f"{len(blocks) + 1}\n{srt_time(start)} --> {srt_time(end)}\n{_wrap(text)}\n")
     return "\n".join(blocks)
+
+
+def to_srt(segments: list[dict]) -> str:
+    return cues_srt(cue for segment in segments for cue in segment_cues(segment))
 
 
 def write_srt(path: Path, segments: list[dict]) -> Path:

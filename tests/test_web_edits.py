@@ -146,7 +146,9 @@ class TestEdits(unittest.TestCase):
         with patch.dict("os.environ", {"GEMINI_API_KEY": "g"}):
             self.assertEqual(self.client.post(f"/api/jobs/{self.job_id}/english", json={}).status_code, 202)
         steps = self.executor.tasks[-1][1][1]
-        self.assertEqual([key for key, _ in steps], ["translation", "summary"])
+        self.assertEqual([key for key, _ in steps], ["translation", "captions", "summary"])
+        self.assertIn("--no-captions", steps[0][1])
+        self.assertTrue(steps[1][1][1].endswith("captions.py"))
         self.assertEqual(self.status()["summary"]["status"], "queued")
 
     def test_a_failed_translation_does_not_leave_the_summary_queued(self):
