@@ -1,6 +1,6 @@
 # Clip rules
 
-Copy this file to `clip_rules.md` (kept out of Git) and write your channel's real rules. The studio's clip finding reads
+Copy this file to `clip_rules.md` and write your channel's real rules. The studio's clip finding reads
 the whole file, so write it the way you would brief a person cutting clips for you. Length limits are enforced by
 `tools/studio.py`, so you don't need to repeat them.
 
