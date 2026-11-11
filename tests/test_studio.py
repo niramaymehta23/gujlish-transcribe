@@ -93,6 +93,149 @@ class TestSpeechTiming(unittest.TestCase):
         self.assertGreaterEqual(pages[1]["from"], 6.4)
 
 
+class TestCaptionBreaks(unittest.TestCase):
+    def test_a_page_breaks_after_punctuation_not_on_a_hanging_word(self):
+        cues = [
+            {
+                "start": 0.0,
+                "end": 12.0,
+                "text": "That's why attending satsang is an investment: just an hour or two a week.",
+            }
+        ]
+        words = studio.speech_words(cues, [(7.4, 8.4)])  # he pauses between "an" and "hour"
+        pages = studio.caption_pages(words, 0.0, 12.0, max_chars=60)
+        self.assertEqual(pages[0]["text"], "That's why attending satsang is an investment:")
+        self.assertTrue(pages[1]["text"].startswith("just an hour"))
+
+    def test_no_page_ends_on_a_small_word(self):
+        cues = [
+            {
+                "start": 0.0,
+                "end": 10.0,
+                "text": "He took off the gold chain from his neck and gave it to the boy right away",
+            }
+        ]
+        pages = studio.caption_pages(studio.speech_words(cues, []), 0.0, 10.0, max_chars=40)
+        for page in pages[:-1]:
+            self.assertNotIn(page["text"].split()[-1].lower(), studio.HANGING_WORDS)
+
+    def test_a_clip_takes_the_words_of_its_own_lines(self):
+        # the previous sentence's words are spoken late in their cue, but they belong to the line before the clip
+        cues = [{"start": 0.0, "end": 10.0, "text": "It's just an hour. There's a sabha every Saturday."}]
+        words = studio.speech_words(cues, [(0.0, 3.0)])
+        lines = studio.sentence_lines(studio.timed_words(cues))
+        span = (lines[1]["start"], lines[1]["end"])
+        pages = studio.caption_pages(words, span[0], 10.0, max_chars=60, span=span)
+        self.assertEqual(pages[0]["text"], "There's a sabha every Saturday.")
+
+
+class TestLongPauses(unittest.TestCase):
+    def test_a_long_silence_inside_a_clip_is_cut_out(self):
+        segments = [{"start": 100.0, "end": 160.0, "line_start": 100.0, "line_end": 160.0}]
+        pieces = studio.trim_long_pauses(segments, [(107.5, 115.4), (120.0, 121.5)])
+        self.assertEqual([(p["start"], p["end"]) for p in pieces], [(100.0, 108.0), (114.9, 160.0)])
+        self.assertAlmostEqual(studio.segments_length(pieces), 60.0 - 6.9)
+
+    def test_short_pauses_and_pauses_at_the_edges_stay(self):
+        segments = [{"start": 100.0, "end": 160.0, "line_start": 100.0, "line_end": 160.0}]
+        self.assertEqual(studio.trim_long_pauses(segments, [(98.0, 104.0), (130.0, 133.0)]), segments)
+
+    def test_captions_skip_the_cut_pause(self):
+        cues = [
+            {"start": 0.0, "end": 4.0, "text": "First he spoke."},
+            {"start": 12.0, "end": 16.0, "text": "Then he went on."},
+        ]
+        words = studio.speech_words(cues, [(4.0, 12.0)])
+        clip = {
+            "segments": studio.trim_long_pauses(
+                [{"start": 0.0, "end": 16.0, "line_start": 0.0, "line_end": 16.0}], [(4.0, 12.0)]
+            )
+        }
+        pages = studio.clip_captions(words, clip, 60)
+        self.assertEqual([p["text"] for p in pages], ["First he spoke.", "Then he went on."])
+        self.assertLess(pages[1]["from"], 6.0)  # the second sentence comes straight after the shortened pause
+
+
+class TestEmphasis(unittest.TestCase):
+    def test_repeated_phrases_are_found_longest_first(self):
+        pages = [
+            {"text": "One yojan means twelve kilometers.", "from": 10.0, "to": 12.0},
+            {"text": "Think about it.", "from": 12.0, "to": 14.0},
+            {"text": "One yojan means twelve kilometers!", "from": 15.0, "to": 17.0},
+        ]
+        found = studio.repeated_phrases(pages)
+        self.assertEqual(found[0], {"text": "one yojan means twelve kilometers", "times": [10.0, 15.0]})
+        self.assertFalse(any(item["text"] == "twelve kilometers" for item in found))
+
+    def test_nothing_repeated_finds_nothing(self):
+        pages = [{"text": "A devotee brought a mango.", "from": 0.0, "to": 2.0}]
+        self.assertEqual(studio.repeated_phrases(pages), [])
+
+
+class TestAlignGraphics(unittest.TestCase):
+    def words(self, text, start, step=0.4):
+        return [{"text": word, "at": round(start + i * step, 2)} for i, word in enumerate(text.split())]
+
+    def test_a_graphic_moves_to_when_its_words_are_said(self):
+        words = self.words("and imagine a well brim-full of water.", 64.0)
+        board = {
+            "scenes": [
+                {"type": "speaker", "from": 0.0, "to": 53.3},
+                {
+                    "type": "picture",
+                    "from": 53.3,
+                    "to": 62.0,
+                    "setting": "water",
+                    "title": "Imagine a well brim-full of water",
+                },
+                {"type": "speaker", "from": 62.0, "to": 80.0},
+            ]
+        }
+        studio.align_graphics(board, words, 80.0)
+        picture = board["scenes"][1]
+        self.assertAlmostEqual(picture["from"], 64.4 - studio.GRAPHIC_LEAD_SECONDS, places=2)
+        self.assertAlmostEqual(picture["to"] - picture["from"], 8.7, places=1)  # it keeps its length
+        self.assertEqual(board["scenes"][0]["to"], picture["from"])
+
+    def test_a_repeated_phrase_matches_the_saying_nearest_the_graphic(self):
+        words = self.words("one yojan means twelve kilometers.", 108.8) + self.words(
+            "one yojan means twelve kilometers!", 115.0
+        )
+        self.assertEqual(studio.spoken_at("Twelve kilometers!", words, 107, 125, near=114.9), 116.2)
+        self.assertEqual(studio.spoken_at("Twelve kilometers!", words, 100, 125, near=108.0), 110.0)
+
+    def test_a_paraphrase_is_left_where_it_is(self):
+        words = self.words("he gave the chain without thinking twice", 10.0)
+        self.assertIsNone(studio.spoken_at("A completely full well", words, 0, 30))
+
+    def test_early_graphics_are_reported(self):
+        words = self.words("a complete waste of time", 39.0)
+        board = {
+            "scenes": [
+                {"type": "speaker", "from": 0, "to": 34.6},
+                {"type": "punch", "from": 34.6, "to": 42, "text": "A complete waste"},
+            ]
+        }
+        self.assertTrue(any("before he says" in w for w in studio.early_graphics(board, words)))
+
+
+class TestRecording(unittest.TestCase):
+    def test_sound_comes_from_the_video_when_it_has_sound(self):
+        record = {"audio": "talk.mp3", "video": "talk.mp4"}
+        folder = Path("/talks/x")
+        with (
+            mock.patch.object(studio, "has_sound", return_value=True),
+            mock.patch.object(Path, "exists", return_value=True),
+        ):
+            self.assertEqual(studio.recording(folder, record), folder / "talk.mp4")
+        with (
+            mock.patch.object(studio, "has_sound", return_value=False),
+            mock.patch.object(Path, "exists", return_value=True),
+        ):
+            self.assertEqual(studio.recording(folder, record), folder / "talk.mp3")
+        self.assertEqual(studio.recording(folder, {"audio": "talk.mp3"}), folder / "talk.mp3")
+
+
 class TestCaptionEdges(unittest.TestCase):
     def test_a_cut_moved_past_the_sentences_does_not_pull_in_neighbouring_words(self):
         words = [

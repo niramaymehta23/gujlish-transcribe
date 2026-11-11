@@ -275,11 +275,37 @@ const repeats = (scene: Scene, captions: CaptionPage[], now: number) => {
     ),
   );
   const said = wordsOf(page.text);
-  return (
+  if (
     said.length > 0 &&
     said.filter((w) => shown.has(w)).length / said.length >= 0.75
+  ) {
+    return true;
+  }
+  // The other way round too: when the caption says most of what the graphic's big words show, the same sentence
+  // would be on screen twice (a headline "Without a second thought" over the caption "Without a second thought, the
+  // boy took off the gold chain…"), so the caption steps aside. Only words that carry meaning are counted.
+  const main = wordsOf(
+    [
+      "headline" in scene ? scene.headline : "",
+      "text" in scene ? scene.text : "",
+      scene.type === "picture" ? (scene.title ?? "") : "",
+      "sub" in scene ? (scene.sub ?? "") : "",
+    ].join(" "),
+  ).filter(meaningful);
+  const heard = new Set(said);
+  return (
+    main.length > 0 &&
+    main.filter((w) => heard.has(w)).length / main.length >= 0.6
   );
 };
+
+const SMALL_WORDS = new Set(
+  "the and but for not you your are was were has had his her its our their this that with from into than then they them what when who how why all any can will just".split(
+    " ",
+  ),
+);
+const meaningful = (word: string) =>
+  word.length > 2 && !SMALL_WORDS.has(word);
 
 const ClipBody: React.FC<ClipProps> = ({
   scenes,

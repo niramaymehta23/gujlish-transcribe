@@ -104,10 +104,12 @@ to back from 0 to exactly the clip's `duration`.
 | `end` | The closing line | `text`, optional `sub` |
 
 Rows, items and lines can take `at`: the clip time when they appear. Set it from `captions.json`, so each appears as it
-is spoken. Caption times follow the real pauses in his speech (`prepare` measures them from the audio), so time every
-scene and `at` to the caption page where those words start: a graphic that shows up before he says it, or long after,
-reads as out of sync. The English is translated from Gujarati, so word order within a sentence can't be matched more
-closely than that.
+is spoken. Caption times follow the real pauses in his speech (`prepare` measures them from the audio, and writes when
+each word is said to `words.json`). **A graphic appears when he says its words, never before**: the team saw graphics
+come up ahead of the speech as the video being out of sync. After writing a storyboard, always run `align` (below),
+which moves each graphic and each row to its words; the storyboard check warns about any graphic still more than a
+second early. The English is translated from Gujarati, so word order within a sentence can't be matched more closely
+than that.
 
 **Style.** Every storyboard names one `style`, the clip's art direction. Vary it across a talk's clips, matching the
 clip's mood:
@@ -168,6 +170,8 @@ halftone; and an earlier "diamond" story video where every beat was its own illu
 speech chips, a stamped word, a spotlight on the object, falling sparkles).
 
 **No channel name on screen.** The videos carry no "Harisena" text: no label, no sign-off. Don't put it in any scene.
+A kicker or label that is only a name ("Bhagwan Swaminarayan", "Akbar and Birbal") adds nothing either: the team
+found it unnecessary. A kicker sets up the line ("Arjuna asked Lord Krishna"), or is left out.
 
 **Icons.** Small icons only mark the rows of a compare, the items of a list and the lines of a story (`icon`, and a
 compare row's `left_icon`), and only when every row or item has one. Names are kebab-case
@@ -181,6 +185,11 @@ lit word would drift off the speech.
 **Pacing.** Keep the hook under 4.5s, a full graphic under 8s, a split under 15s and the speaker alone under 15s; the
 check warns past these. Change the picture whenever the idea changes. Captions are added by the video itself, in one
 place low in the frame, so leave that area to them.
+
+**His emphasis is a big moment.** When he repeats a point (`prepare` lists the phrases he says more than once, with
+their times, and keeps them in `clip.json` as `emphasis`), or leans hard on a word, mark it on screen: a `punch` or
+`agna` on the repeat, big, so the viewer feels the weight he gives it. Don't let a point he says three times pass with
+nothing on screen.
 
 **Mix graphics with the speaker.** Show him talking wherever a graphic would only repeat itself: when the idea is being
 restated, when his delivery or a pause carries the moment, or when the last graphic has done its work. Use graphics
@@ -198,7 +207,8 @@ no flag.
 Guruhari Prabodh Swamiji, Guruhari Hariprasad Swamiji, God, or anyone else, not even hands; the check rejects picture
 descriptions that name a person.
 
-Run `storyboard <talk> <numbers>` until it passes. For the `post` section: keep the title true to the clip, and for
+Run `align <talk> <numbers>`, then `storyboard <talk> <numbers>` until it passes with no early graphics and every
+join covered (align can move a graphic off a join; then add or move one to cover it, and align again). For the `post` section: keep the title true to the clip, and for
 shorts add `#Shorts` to the title. Explain any term a newcomer wouldn't know in the description.
 
 ## 5. Look before rendering
@@ -225,7 +235,8 @@ this for every frame:
 - **Truth and fit.** Each picture shows exactly what is said (a mango, not an orange); no meaningless decoration.
 - **The speaker.** His face is in frame (fix with `focus`), framed with breathing room, and on screen for 60-75%.
 
-The captions hide themselves while a graphic shows the same words, so a quote is never shown twice. Fix the storyboard,
+The captions hide themselves while a graphic shows the same words, or while they say most of the graphic's big words,
+so a sentence is never on screen twice. Fix the storyboard,
 or the code when it is the design, and preview again until every frame passes. A long clip's full render is costly, so
 fix things here.
 
@@ -244,6 +255,9 @@ every later talk benefits, and tell them you did.
 
 ## Things to know
 
+- `prepare` cuts any silence over 5s out of a clip (he drinks water, waits for the hall), keeping half a second each
+  side; the cut is a join like any other, so cover it with a graphic. The sound comes from the video's own soundtrack
+  when there is a video: a separate audio download can be offset from the picture.
 - Cuts land on real pauses, but they are found from audio levels, so a cut could still clip a word. `clips.md` says so
   when a cut didn't land on a clear pause.
 - The SRT only has timing for chunks of speech, so caption and sentence times inside a chunk are estimates. Captions can

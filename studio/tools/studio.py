@@ -202,14 +202,18 @@ def speech_words(cues: list[dict], pauses: list[tuple[float, float]]) -> list[di
             return runs[-1][1]
 
         total = sum(len(part) for part in parts)
+        span = max(0.0, cue["end"] - cue["start"])
         used = 0
         for part in parts:
             start = place(used / total, True)
+            # where timed_words puts the word's middle: the sentence lines a clip is chosen by are cut on those
+            # times, so a clip takes exactly the words of its lines, whatever their speech timing
+            mid = cue["start"] + span * (used + len(part) / 2) / total
             used += len(part)
             # a word ends where its own run ends, never across a pause
             end = place(used / total, False)
             run_end = next((high for low, high in runs if low - 1e-9 <= start < high), end)
-            words.append({"start": start, "end": min(end, run_end), "text": part})
+            words.append({"start": start, "end": min(end, run_end), "text": part, "mid": mid})
     return words
 
 
@@ -255,14 +259,44 @@ def sentence_lines(words: list[dict]) -> list[dict]:
     return lines
 
 
+# Small words that lean on the word after them; a caption page never ends on one.
+HANGING_WORDS = frozenset(
+    "a an the of to in on at by for from with and but or nor so as than that this these those is are was were be "
+    "been has have had my your his her its our their just very not no".split()
+)
+
+
+def piece_words(words: list[dict], start: float, end: float, span: tuple[float, float] | None = None) -> list[dict]:
+    """The words of one piece of a clip: those of its own sentence lines (`span`) that are spoken inside the piece, so
+    nothing cut away (past the clip's end, or across a trimmed pause) is shown."""
+    low, high = span or (start, end)
+    return [
+        word
+        for word in words
+        if low - 0.01 <= word.get("mid", (word["start"] + word["end"]) / 2) <= high + 0.01
+        and start - 0.3 <= (word["start"] + word["end"]) / 2 <= end + 0.3
+    ]
+
+
+def clip_words(words: list[dict], clip: dict) -> list[dict]:
+    """Every word of a clip with when he says it, in clip time: what graphics are timed to."""
+    timed, offset = [], 0.0
+    for segment in segments_of(clip):
+        span = (segment["line_start"], segment["line_end"])
+        for word in piece_words(words, segment["start"], segment["end"], span):
+            at = max(0.0, word["start"] - segment["start"]) + offset
+            timed.append({"text": word["text"], "at": round(at, 3)})
+        offset += segment["end"] - segment["start"]
+    return timed
+
+
 def caption_pages(
     words: list[dict], start: float, end: float, max_chars: int, span: tuple[float, float] | None = None
 ) -> list[dict]:
     """Caption pages for one clip, in clip time. A page ends at a sentence, or when full, and stays up across a short
     pause so captions don't flicker. `span` is where the clip's own sentences run: a cut moved onto a pause can reach
     past them, and the neighbouring words must not show up in its captions."""
-    low, high = span or (start, end)
-    inside = [word for word in words if low - 0.01 <= (word["start"] + word["end"]) / 2 <= high + 0.01]
+    inside = piece_words(words, start, end, span)
     pages: list[list[dict]] = [[]]
     for word in inside:
         page = pages[-1]
@@ -278,9 +312,17 @@ def caption_pages(
             def comma(at: int) -> bool:
                 return page[at - 1]["text"].rstrip(QUOTES)[-1:] in ",;:—–"
 
-            cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, pause)), None)
+            def loose(at: int) -> bool:
+                """A page may not end on a word that leans on the next one ("just an | hour")."""
+                return page[at - 1]["text"].lower().strip("\"'“”‘’") in HANGING_WORDS
+
+            cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, comma)), None)
             if cut is None:
-                cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, comma)), len(page))
+                cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, pause) and not loose(at)), None)
+            if cut is None:
+                cut = len(page)
+                while cut > 1 and loose(cut) and sum(len(w["text"]) + 1 for w in page[: cut - 1]) >= max_chars // 3:
+                    cut -= 1
             pages[-1], page = page[:cut], page[cut:]
             pages.append(page)
         page.append(word)
@@ -391,6 +433,55 @@ def segments_of(clip: dict) -> list[dict]:
     return clip.get("segments") or [
         {"start": clip["start"], "end": clip["end"], "line_start": clip["line_start"], "line_end": clip["line_end"]}
     ]
+
+
+EMPHASIS_SMALL_WORDS = frozenset(
+    "a an the of to in on at by for from with and but or so as is are was were be it this that he she we you they i "
+    "his her our your their my me him them us what how".split()
+)
+
+
+def repeated_phrases(pages: list[dict]) -> list[dict]:
+    """Phrases he says more than once in a clip, with each time he says them: repetition is how he marks a big point,
+    and the storyboard should make it a big moment on screen. Longest first; shorter phrases inside a reported one
+    are left out."""
+    words = []
+    for index, page in enumerate(pages):
+        for word in page["text"].split():
+            clean = re.sub(r"[^\w'-]", "", word.lower())
+            if clean:
+                words.append((clean, index, page["from"]))
+    found: dict[str, list[float]] = {}
+    for size in range(6, 1, -1):
+        for at in range(len(words) - size + 1):
+            gram = words[at : at + size]
+            if len({page for _, page, _ in gram}) > 1:
+                continue  # a phrase across two pages isn't one phrase
+            if sum(word not in EMPHASIS_SMALL_WORDS for word, _, _ in gram) < 2:
+                continue
+            times = found.setdefault(" ".join(word for word, _, _ in gram), [])
+            if gram[0][2] not in times:
+                times.append(gram[0][2])
+    kept: dict[str, list[float]] = {}
+    for text, times in sorted(found.items(), key=lambda item: -len(item[0].split())):
+        if len(times) > 1 and not any(text in longer and len(times) <= len(more) for longer, more in kept.items()):
+            kept[text] = times
+    repeated = [{"text": text, "times": times} for text, times in kept.items()]
+    return sorted(repeated, key=lambda item: (-len(item["text"].split()), item["times"][0]))
+
+
+def trim_long_pauses(segments: list[dict], pauses: list[tuple[float, float]]) -> list[dict]:
+    """The pieces of a clip with any long silence inside them cut out, such as a pause to drink water. Each side keeps
+    a short breath of the pause, so the speech doesn't run together."""
+    trimmed = []
+    for segment in segments:
+        at = segment["start"]
+        for low, high in sorted(pauses):
+            if high - low >= LONG_PAUSE_SECONDS and segment["start"] + 1 < low and high < segment["end"] - 1:
+                trimmed.append({**segment, "start": at, "end": round(low + PAUSE_KEPT_SECONDS, 3)})
+                at = round(high - PAUSE_KEPT_SECONDS, 3)
+        trimmed.append({**segment, "start": at})
+    return trimmed
 
 
 def clip_captions(words: list[dict], clip: dict, max_chars: int) -> list[dict]:
@@ -902,9 +993,17 @@ def build_lines(folder: Path) -> list[dict]:
 
 
 def recording(folder: Path, record: dict) -> Path | None:
-    """The file to take sound from: the audio the subtitles were made from, else the video."""
-    key = "audio" if "audio" in record else "video" if "video" in record else None
-    return folder / record[key] if key else None
+    """The file to take sound from. With a video, its own soundtrack: a separate audio download can be offset from the
+    picture (one talk's MP3 ran 36 ms ahead), which shows as lips out of sync. Else the audio file."""
+    if "video" in record:
+        video = folder / record["video"]
+        if not video.exists() or has_sound(video):
+            return video
+    return folder / record["audio"] if "audio" in record else None
+
+
+def has_sound(path: Path) -> bool:
+    return any(stream.get("codec_type") == "audio" for stream in media_info(path).get("streams", []))
 
 
 def cmd_check(args) -> None:
@@ -961,13 +1060,16 @@ def cmd_prepare(args) -> None:
         raise StudioError("This talk has no audio or video. Put the file in its source folder and add it to talk.json.")
     video = folder / record["video"] if "video" in record else None
     cues = parse_srt((folder / record["srt"]).read_text(encoding="utf-8", errors="replace"))
-    words = speech_words(cues, speech_pauses(media))
+    pauses = speech_pauses(media)
+    words = speech_words(cues, pauses)
     for number in args.numbers:
         clip = clips.get(number)
         if not clip:
             raise StudioError(f"There is no clip {number} in clips.md.")
         start, end = clip["start"], clip["end"]
-        segments = segments_of(clip)
+        segments = trim_long_pauses(segments_of(clip), pauses)
+        trims = len(segments) - len(segments_of(clip))
+        clip = {**clip, "segments": segments}
         target = folder / "clips" / f"{number:02d}-{safe_name(clip['title'], 60)}"
         public = target / "public"
         public.mkdir(parents=True, exist_ok=True)
@@ -986,9 +1088,22 @@ def cmd_prepare(args) -> None:
             "has_video": bool(video),
         }
         write_json(target / "clip.json", info)
-        write_json(target / "captions.json", clip_captions(words, clip, CAPTION_CHARS[clip["format"]]))
+        pages = clip_captions(words, clip, CAPTION_CHARS[clip["format"]])
+        write_json(target / "captions.json", pages)
+        write_json(target / "words.json", clip_words(words, clip))
+        emphasis = repeated_phrases(pages)
+        if emphasis:
+            info["emphasis"] = emphasis
+            write_json(target / "clip.json", info)
         print(f"Clip {number}: {target}")
         print(f"  {fmt(duration)} ({duration}s), {clip['format']}, {'with' if video else 'no'} speaker video")
+        for item in emphasis[:5]:
+            said = ", ".join(f"{t:.1f}s" for t in item["times"])
+            print(f'  He repeats "{item["text"]}" ({said}): make it a big moment on screen.')
+        if trims:
+            print(
+                f"  Cut {trims} long pause{'s' if trims > 1 else ''} (over {LONG_PAUSE_SECONDS:g}s of silence) out of it."
+            )
         for join in info["joins"]:
             print(f"  Joins two pieces at {join}s: cover it with a full-screen graphic, or the cut shows on his video.")
 
@@ -996,6 +1111,8 @@ def cmd_prepare(args) -> None:
 SCALE = "scale='if(gt(ih,1080),-2,iw)':'if(gt(ih,1080),1080,ih)',fps=30,format=yuv420p"
 LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
 EDGE_FADE = 0.03  # seconds of fade at each join, so the sound doesn't click
+LONG_PAUSE_SECONDS = 5.0  # a silence this long inside a clip (a drink of water, a break) is cut out
+PAUSE_KEPT_SECONDS = 0.5  # of such a pause, this much stays on each side
 
 
 def _inputs(path: Path, segments: list[dict]) -> list[str]:
@@ -1072,6 +1189,112 @@ def remotion(command: list[str]) -> None:
         raise StudioError("Remotion stopped with an error (see above).")
 
 
+GRAPHIC_LEAD_SECONDS = 0.15  # a graphic appears this much before its first word, as he starts to say it
+EARLY_GRAPHIC_SECONDS = 1.0  # the check warns when a graphic is up this long before its words are said
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.sub(r"[^\w\s'-]", " ", text.lower()).split() if t]
+
+
+def scene_phrase(scene: dict) -> str:
+    """The words a graphic shows that he says aloud: what it should appear with."""
+    return str(scene.get("headline") or scene.get("text") or scene.get("title") or "")
+
+
+def spoken_at(phrase: str, words: list[dict], low: float, high: float, near: float | None = None) -> float | None:
+    """When he starts saying `phrase`, searching the words spoken between `low` and `high`: the start of the stretch
+    that says most of its words in order. None when the phrase isn't really said there (a paraphrase)."""
+    wanted = [t for t in _tokens(phrase) if t not in EMPHASIS_SMALL_WORDS] or _tokens(phrase)
+    if not wanted:
+        return None
+    heard = [(t, w["at"]) for w in words if low <= w["at"] <= high for t in _tokens(w["text"])[:1]]
+    found = []
+    for at, (token, when) in enumerate(heard):
+        if token not in wanted:
+            continue
+        window = {t for t, _ in heard[at : at + len(_tokens(phrase)) + 4]}
+        found.append((sum(t in window for t in wanted) / len(wanted), when))
+    if not found or max(score for score, _ in found) < 0.6:
+        return None
+    best = max(score for score, _ in found)
+    # said more than once (he repeats a point): the saying nearest where the graphic was put is the one it marks
+    return min((when for score, when in found if score >= best - 1e-9), key=lambda when: abs(when - (near or low)))
+
+
+def align_graphics(board: dict, words: list[dict], duration: float) -> list[str]:
+    """Move each graphic to start as he says its words, and each table row, list item or story line to appear as it
+    is said. A graphic moved later leaves its old start to the speaker, so the graphic before it doesn't overstay.
+    Returns what moved."""
+    scenes, moved = board["scenes"], []
+    index = 1
+    while index < len(scenes):
+        scene, before = scenes[index], scenes[index - 1]
+        if scene["type"] != "speaker":
+            said = spoken_at(scene_phrase(scene), words, scene["from"] - 8, scene["to"] + 4, scene["from"])
+            if said is not None:
+                target = max(round(said - GRAPHIC_LEAD_SECONDS, 2), before["from"] + MIN_SCENE_SECONDS)
+                after = scenes[index + 1] if index + 1 < len(scenes) else None
+                # moving later, the graphic keeps its length: the speaker after it gives up the time
+                stretch = target > scene["from"] and after is not None and after["type"] == "speaker"
+                end = scene["to"]
+                if stretch:
+                    end = min(scene["to"] + target - scene["from"], after["to"] - MIN_SCENE_SECONDS)
+                target = round(min(target, end - MIN_SCENE_SECONDS), 2)
+                if abs(target - scene["from"]) >= 0.3:
+                    moved.append(f'{scene["type"]} "{scene_phrase(scene)[:40]}": {scene["from"]}s -> {target}s')
+                    later = target - scene["from"]
+                    if stretch:
+                        scene["to"] = after["from"] = round(min(scene["to"] + later, end), 2)
+                    if later >= MIN_SCENE_SECONDS and before["type"] != "speaker":
+                        scenes.insert(index, {"type": "speaker", "from": scene["from"], "to": target})
+                        index += 1
+                    else:
+                        before["to"] = target
+                    scene["from"] = target
+            for field in ("rows", "items", "lines", "chips"):
+                for entry in scene.get(field) or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    text = entry.get("left") or entry.get("text") or ""
+                    when = spoken_at(text, words, scene["from"], scene["to"], entry.get("at"))
+                    at = when - GRAPHIC_LEAD_SECONDS if when is not None else entry.get("at")
+                    if at is not None:
+                        entry["at"] = round(min(max(at, scene["from"] + 0.2), scene["to"] - 0.5), 2)
+        index += 1
+    scenes[-1]["to"] = duration
+    return moved
+
+
+def early_graphics(board: dict, words: list[dict]) -> list[str]:
+    """Graphics that come up well before he says their words."""
+    found = []
+    for index, scene in enumerate(board["scenes"][1:], 2):
+        if scene["type"] == "speaker":
+            continue
+        said = spoken_at(scene_phrase(scene), words, scene["from"] - 8, scene["to"] + 4, scene["from"])
+        if said is not None and said - scene["from"] > EARLY_GRAPHIC_SECONDS:
+            found.append(
+                f"Scene {index} ({scene['type']}) is up {said - scene['from']:.1f}s before he says its words. Run align."
+            )
+    return found
+
+
+def cmd_align(args) -> None:
+    """Time each graphic, and each row of a table or list, to when he says its words."""
+    folder = talk_folder(args.talk)
+    for number in args.numbers:
+        target = clip_folder(folder, number)
+        clip, board = read_json(target / "clip.json"), read_json(target / "storyboard.json")
+        if not (target / "words.json").exists():
+            raise StudioError(f"Clip {number} has no words.json yet. Run prepare again.")
+        moved = align_graphics(board, read_json(target / "words.json"), clip["duration"])
+        write_json(target / "storyboard.json", board)
+        print(f"Clip {number}: {len(moved)} graphic{'s' if len(moved) != 1 else ''} moved to their words")
+        for line in moved:
+            print(f"  {line}")
+
+
 def cmd_storyboard(args) -> None:
     """Check a storyboard and write the frames to look at."""
     folder = talk_folder(args.talk)
@@ -1081,6 +1304,9 @@ def cmd_storyboard(args) -> None:
         print(
             f"Clip {number}: storyboard is valid, {len(board['scenes'])} scenes, speaker on screen {speaker:.0f}s of {clip['duration']:.0f}s"
         )
+        words_file = clip_folder(folder, number) / "words.json"
+        if words_file.exists():
+            warnings = warnings + early_graphics(board, read_json(words_file))
         for warning in warnings:
             print(f"  Warning: {warning}")
 
@@ -1441,6 +1667,7 @@ def main(argv: list[str] | None = None) -> int:
     add("check", cmd_check)
     add("prepare", cmd_prepare).add_argument("numbers", type=int, nargs="+")
     add("storyboard", cmd_storyboard).add_argument("numbers", type=int, nargs="+")
+    add("align", cmd_align).add_argument("numbers", type=int, nargs="+")
     pictures = add("pictures", cmd_pictures)
     pictures.add_argument("numbers", type=int, nargs="+")
     pictures.add_argument("--redo", nargs="+", metavar="NAME", help="Make these pictures again")
