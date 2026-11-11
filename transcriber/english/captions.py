@@ -23,7 +23,11 @@ rewritten from it; the chunk-by-chunk subtitles stay available as `<name>.en.uns
 
 from __future__ import annotations
 
+import bisect
 import json
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from transcriber.english.llm import LLMError, parse_json_object
@@ -33,10 +37,11 @@ from transcriber.files.textutil import escape_tags, sha, write_json
 from transcriber.speech.align import load_word_times, run_alignment
 from transcriber.speech.postprocess import drop_cut_stop
 
-PROMPT_VERSION = "captions-v1"
+PROMPT_VERSION = "captions-v2"
 WINDOW_WORDS = 150  # English words per request (about two minutes of speech), then on to the end of the sentence
 MAX_WINDOW_WORDS = 240
-CONTEXT_CAPTIONS = 3  # finished captions shown before the window
+CONTEXT_WORDS = 40  # English shown before the window, for understanding only
+CONCURRENT_REQUESTS = 4  # windows asked at the same time (each takes up to a minute)
 FOLLOWING_WORDS = 30  # English shown after the window, for understanding only
 REPLY_TOKENS = 4096
 LINGER_SECONDS = 0.4  # a caption stays this long after its last word, unless the next one starts first
@@ -158,7 +163,7 @@ def windows(words: list[str]) -> list[tuple[int, int]]:
     return out
 
 
-def build_prompt(material: Material, start: int, stop: int, previous: list[str]) -> tuple[str, list[int]]:
+def build_prompt(material: Material, start: int, stop: int) -> tuple[str, list[int]]:
     """The request for English words [start, stop), and the global index of each numbered Gujarati word."""
     first = max(0, material.word_unit[start] - 1)
     last = min(len(material.units) - 1, material.word_unit[stop - 1] + 1)
@@ -172,23 +177,36 @@ def build_prompt(material: Material, start: int, stop: int, previous: list[str])
         if pieces:
             lines.append(" ".join(pieces))
     parts = []
+    previous = material.words[max(0, start - CONTEXT_WORDS) : start]
     if previous:
-        parts.append("<before>\n" + "\n".join(escape_tags(text) for text in previous) + "\n</before>")
+        parts.append("<before>\n… " + escape_tags(" ".join(previous)) + "\n</before>")
     parts.append("<gujarati>\n" + "\n".join(lines) + "\n</gujarati>")
     parts.append("<english>\n" + escape_tags(" ".join(material.words[start:stop])) + "\n</english>")
     following = material.words[stop : stop + FOLLOWING_WORDS]
     if following:
         parts.append("<after>\n" + escape_tags(" ".join(following)) + " …\n</after>")
     parts.append(
-        "Split the text in <english> into captions. <before> holds the captions just before it and <after> what comes "
+        "Split the text in <english> into captions. <before> holds the English just before it and <after> what comes "
         "next; both are context only. <gujarati> holds the numbered Gujarati words it was translated from."
     )
     return "\n\n".join(parts), shown
 
 
-def parse_captions(text: str, words: list[str], numbered: int) -> list[dict] | str:
-    """Captions from a reply, or why the reply cannot be used. Each caption gets `gu`, a 1-based number of the
-    Gujarati words shown, or None when the reply gave none that is usable."""
+# Spelling differences a reply may make that do not change the English: quote and dash styles. Captions are always
+# cut from the original text, so the original's own characters are what is shown.
+SAME = str.maketrans({"‘": "'", "’": "'", "`": "'", "“": '"', "”": '"', "„": '"', "–": "-", "—": "-", "…": "..."})
+
+
+def _spans(text: str) -> list[tuple[int, int]]:
+    """[start, end) of each word in `text`."""
+    return [match.span() for match in re.finditer(r"\S+", text)]
+
+
+def parse_captions(text: str, original: str, numbered: int) -> list[dict] | str:
+    """Captions from a reply, or why the reply cannot be used. The reply must have the same letters in the same
+    order as `original` (spaces, quote and dash styles aside); each caption becomes the stretch of `original` it
+    covers, `chars` = [start, end), so a reply may break a caption inside a word joined by a dash ("here—I'm") but
+    can never change the wording. `gu` is a 1-based number of the Gujarati words shown, or None if unusable."""
     try:
         value = parse_json_object(text)
     except LLMError as error:
@@ -196,67 +214,93 @@ def parse_captions(text: str, words: list[str], numbered: int) -> list[dict] | s
     items = value.get("captions")
     if not isinstance(items, list) or not items:
         return "no captions list"
-    captions, tokens = [], []
+    letters = [(same, at) for at, char in enumerate(original) if not char.isspace() for same in char.translate(SAME)]
+    captions, used = [], 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str) or not item["text"].split():
             return "a caption without text"
-        parts = item["text"].split()
-        tokens += parts
+        mine = [same for char in item["text"] if not char.isspace() for same in char.translate(SAME)]
+        theirs = [char for char, _ in letters[used : used + len(mine)]]
+        if mine != theirs:
+            at = next((i for i, (a, b) in enumerate(zip(mine, theirs)) if a != b), len(theirs))
+            if used + at >= len(letters):
+                return "the captions add words after the end of the English"
+            where = letters[used + at][1]
+            word = original[original.rfind(" ", 0, where) + 1 :].split()[0]
+            return f'the captions do not repeat the English exactly (they differ near "{word}")'
+        first, last = letters[used][1], letters[used + len(mine) - 1][1] + 1
+        used += len(mine)
         gu = item.get("gu")
         if isinstance(gu, str) and gu.strip().isdigit():
             gu = int(gu)
         valid = isinstance(gu, int) and not isinstance(gu, bool) and 1 <= gu <= numbered
-        captions.append({"text": " ".join(parts), "gu": gu if valid else None})
-    if tokens != words:
-        at = next((i for i, (a, b) in enumerate(zip(tokens, words)) if a != b), min(len(tokens), len(words)))
-        return (
-            f'the captions do not repeat the English word for word (they differ at word {at + 1}, "{words[at]}")'
-            if at < len(words)
-            else "the captions add words after the end of the English"
-        )
+        captions.append({"chars": [first, last], "gu": gu if valid else None})
+    if used < len(letters):
+        word = original[letters[used][1] :].split()[0]
+        return f'the captions leave out the English from "{word}" on'
     return captions
 
 
-def plain_captions(words: list[str]) -> list[dict]:
+def plain_captions(original: str) -> list[dict]:
     """Captions by the plain rules (sentence ends, then phrase ends, then length), for a reply that cannot be used."""
-    return [{"text": " ".join(words[i] for i in group), "gu": None} for group in cue_groups(words)]
+    spans = _spans(original)
+    groups = cue_groups([original[a:b] for a, b in spans])
+    return [{"chars": [spans[g[0]][0], spans[g[-1]][1]], "gu": None} for g in groups]
 
 
-def fit(captions: list[dict]) -> list[dict]:
+def fit(captions: list[dict], original: str) -> list[dict]:
     """Split any caption longer than two lines at its best break; the first piece keeps the start word."""
     out = []
     for caption in captions:
-        if len(caption["text"]) <= MAX_CUE_CHARS:
+        first, last = caption["chars"]
+        if last - first <= MAX_CUE_CHARS:
             out.append(caption)
             continue
-        words = caption["text"].split()
-        for number, group in enumerate(cue_groups(words)):
-            out.append({"text": " ".join(words[i] for i in group), "gu": caption["gu"] if number == 0 else None})
+        spans = [(first + a, first + b) for a, b in _spans(original[first:last])]
+        for number, group in enumerate(cue_groups([original[a:b] for a, b in spans])):
+            piece = [spans[group[0]][0], spans[group[-1]][1]]
+            out.append({"chars": piece, "gu": caption["gu"] if number == 0 else None})
     return out
 
 
-def ask(llm, prompt: str, words: list[str], numbered: int) -> list[dict] | None:
-    """Captions for one window from the model, retried once with the reason; None when both replies are unusable.
-    Network and API errors are raised, so the run stops and can resume."""
-    note = ""
+def join_split_phrases(captions: list[dict]) -> list[dict]:
+    """Merge a caption that ends mid-phrase (no sentence or phrase mark) into the next one when both fit in one
+    caption, so words that belong together are shown together. A word broken at a dash is joined back without a
+    space. The merged caption keeps the first one's start word."""
+    out: list[dict] = []
+    for caption in captions:
+        if out:
+            before = out[-1]
+            shared = before["span"][1] > caption["span"][0]  # broken inside a word, e.g. "here—" / "I'm"
+            text = before["text"] + ("" if shared else " ") + caption["text"]
+            open_ended = not _ends(before["text"], SENTENCE_END + PHRASE_END)
+            if open_ended and len(text) <= MAX_CUE_CHARS:
+                out[-1] = {"text": text, "span": (before["span"][0], caption["span"][1]), "gu": before["gu"]}
+                continue
+        out.append(caption)
+    return out
+
+
+def ask(llm, prompt: str, original: str, numbered: int) -> tuple[list[dict] | None, str]:
+    """Captions for one window from the model, retried once with the reason; (None, reason) when both replies are
+    unusable. Network and API errors are raised, so the run stops and can resume."""
+    note, problem = "", ""
     for _ in range(2):
         reply = llm.complete(system_prompt(), prompt + note, max_tokens=REPLY_TOKENS)
-        result = "the reply was cut short" if reply.truncated else parse_captions(reply.text, words, numbered)
+        result = "the reply was cut short" if reply.truncated else parse_captions(reply.text, original, numbered)
         if not isinstance(result, str):
-            return result
+            return result, ""
+        problem = result
         note = f"\n\nYour previous reply could not be used: {result}. Copy the English exactly."
-    return None
+    return None, problem
 
 
 def place(material: Material, captions: list[dict]) -> list[dict]:
-    """Start and end times for captions covering all the English words in order. `gu` is a global Gujarati word
-    index or None. A start word is used only when it is timed, lies in or next to the chunks the caption's English
-    came from, and comes after the previous caption's."""
-    spans, at = [], 0
-    for caption in captions:
-        size = len(caption["text"].split())
-        spans.append((at, at + size))
-        at += size
+    """Start and end times for captions in order. Each has its `text`, `span` = the [first, last) English words it
+    shows (a word broken at a dash belongs to both captions), and `gu`, a global Gujarati word index or None. A start
+    word is used only when it is timed, lies in or next to the chunks the caption's English came from, is said around
+    where the caption's words sit and comes after the previous caption's."""
+    spans = [tuple(caption["span"]) for caption in captions]
     anchors: list[int | None] = []
     last = -1
     for caption, (a, b) in zip(captions, spans):
@@ -411,33 +455,71 @@ def run_captions(
 
     label_llm = getattr(llm, "label", None)
     spans = windows(material.words)
-    captions: list[dict] = []
-    used = []
-    for done, (start, stop) in enumerate(spans, 1):
-        prompt, shown = build_prompt(material, start, stop, [c["text"] for c in captions[-CONTEXT_CAPTIONS:]])
+    parts = []
+    for start, stop in spans:
+        prompt, shown = build_prompt(material, start, stop)
         words = material.words[start:stop]
         key = sha([PROMPT_VERSION, label_llm, words, [material.gu[i] for i in shown]])
-        item = cache.get(key)
-        if item is None and llm is not None:
-            try:
-                result = ask(llm, prompt, words, len(shown))
-            except LLMError as error:
-                raise RuntimeError(f"Captions stopped at part {done}/{len(spans)}: {error}") from None
-            if result is None:
-                log(f"Note: part {done}/{len(spans)} kept the plain caption breaks (the model's reply did not fit).")
-            item = {"key": key, "captions": result or plain_captions(words), "plain": result is None}
-            with partial.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
-        elif item is None:
-            item = {"key": key, "captions": plain_captions(words), "plain": True}
-        used.append(item)
-        for caption in fit(item["captions"]):
-            gu = caption.get("gu")
-            captions.append({"text": caption["text"], "gu": shown[gu - 1] if gu and gu <= len(shown) else None})
-        if progress:
-            progress({"stage": "captioning", "done": done, "total": len(spans), "at": units[-1]["end"]})
+        parts.append({"start": start, "prompt": prompt, "shown": shown, "original": " ".join(words), "key": key})
+    items: list[dict | None] = [cache.get(part["key"]) for part in parts]
+    todo = [number for number, item in enumerate(items) if item is None]
+    done = len(parts) - len(todo)
+    if llm is not None and todo:
+        # Windows are independent (each sees the English around it), so several are asked at once.
+        lock = threading.Lock()
 
-    placed = place(material, captions)
+        def request(number: int) -> None:
+            part = parts[number]
+            result, problem = ask(llm, part["prompt"], part["original"], len(part["shown"]))
+            if result is None:
+                log(f"Note: part {number + 1}/{len(parts)} kept the plain caption breaks ({problem}).")
+            item = {"key": part["key"], "captions": result or plain_captions(part["original"]), "plain": not result}
+            if problem:
+                item["problem"] = problem
+            with lock:
+                items[number] = item
+                with partial.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+        with ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS) as pool:
+            futures = {pool.submit(request, number): number for number in todo}
+            try:
+                for future in as_completed(futures):
+                    future.result()
+                    done += 1
+                    if progress:
+                        progress({"stage": "captioning", "done": done, "total": len(parts), "at": units[-1]["end"]})
+            except LLMError as error:
+                for future in futures:
+                    future.cancel()
+                first = min(number for number in todo if items[number] is None)
+                raise RuntimeError(f"Captions stopped at part {first + 1}/{len(parts)}: {error}") from None
+    if progress and not todo:
+        progress({"stage": "captioning", "done": len(parts), "total": len(parts), "at": units[-1]["end"]})
+
+    captions: list[dict] = []
+    used = []
+    for part, item in zip(parts, items):
+        start, shown, original = part["start"], part["shown"], part["original"]
+        if item is None:  # no model: the plain rules, not saved
+            item = {"key": part["key"], "captions": plain_captions(original), "plain": True}
+        else:
+            used.append(item)
+        starts = [a for a, _ in _spans(original)]
+        for caption in fit(item["captions"], original):
+            first, last = caption["chars"]
+            a = bisect.bisect_right(starts, first) - 1
+            b = bisect.bisect_right(starts, last - 1)
+            gu = caption.get("gu")
+            captions.append(
+                {
+                    "text": original[first:last],
+                    "span": (start + a, start + b),
+                    "gu": shown[gu - 1] if gu and gu <= len(shown) else None,
+                }
+            )
+
+    placed = place(material, join_split_phrases(captions))
     write_json(
         paths["captions_json"],
         {

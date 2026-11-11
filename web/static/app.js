@@ -466,7 +466,7 @@ function updateStageBox() {
     state = [translation, captions].find(s => running(s) || s.status === 'error') || summary;
     const stale = Boolean(current.english_stale || current.summary_stale);
     // Only the subtitles are behind: a translation made before captions were timed, or whose timing stopped.
-    const captionsOnly = !stale && translation.status === 'complete' && Boolean(current.captions_stale);
+    const captionsOnly = !stale && translation.status === 'complete' && summary.status === 'complete' && Boolean(current.captions_stale);
     const done = translation.status === 'complete' && summary.status === 'complete' && !current.captions_stale;
     explain = current.youtube_missing && !current.english_stale ? 'This summary was made before YouTube titles and descriptions were added. Updating rewrites it with them.'
       : stale ? 'You’ve fixed words since this English was made. Updating re-translates only the lines you changed, then re-times the subtitles and rewrites the summary and YouTube details.'

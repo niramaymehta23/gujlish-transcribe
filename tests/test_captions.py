@@ -178,23 +178,70 @@ class TestWordTimes(Base):
 
 
 class TestReplies(unittest.TestCase):
-    WORDS = "The king's son, a prince born into a royal family, can he grow up in one day?".split()
+    TEXT = "The king's son, a prince born into a royal family, can he grow up in one day?"
+
+    def texts(self, captions, original=None):
+        return [(original or self.TEXT)[a:b] for a, b in (c["chars"] for c in captions)]
 
     def test_a_reply_that_keeps_every_word_is_used(self):
-        result = cap.parse_captions(json.dumps({"captions": GOOD}), self.WORDS, 10)
+        result = cap.parse_captions(json.dumps({"captions": GOOD}), self.TEXT, 10)
         self.assertEqual([c["gu"] for c in result], [1, 7])
+        self.assertEqual(self.texts(result), [GOOD[0]["text"], GOOD[1]["text"]])
 
     def test_changed_dropped_or_added_words_are_refused(self):
-        for text in ("The king's son, a prince born in a royal family,", "The king's son, a prince"):
-            reply = json.dumps({"captions": [{"gu": 1, "text": text}, GOOD[1]]})
-            self.assertIsInstance(cap.parse_captions(reply, self.WORDS, 10), str)
+        changed = json.dumps({"captions": [{"gu": 1, "text": "The king's son, a prince born in a royal family,"}]})
+        self.assertIn('near "into"', cap.parse_captions(changed, self.TEXT, 10))
+        dropped = json.dumps({"captions": [GOOD[0]]})
+        self.assertIn('from "can" on', cap.parse_captions(dropped, self.TEXT, 10))
         extra = json.dumps({"captions": [*GOOD, {"gu": 9, "text": "Jai!"}]})
-        self.assertIn("add words", cap.parse_captions(extra, self.WORDS, 10))
-        self.assertIsInstance(cap.parse_captions("no json here", self.WORDS, 10), str)
+        self.assertIn("add words", cap.parse_captions(extra, self.TEXT, 10))
+        self.assertIsInstance(cap.parse_captions("no json here", self.TEXT, 10), str)
+
+    def test_a_break_inside_a_dashed_word_or_other_quote_marks_keep_the_original_text(self):
+        original = "We came here—I\u2019m talking to parents—to live happily…"
+        reply = {
+            "captions": [
+                {"gu": 1, "text": "We came here-"},
+                {"gu": 2, "text": "I'm talking to parents— to live happily..."},
+            ]
+        }
+        result = cap.parse_captions(json.dumps(reply, ensure_ascii=False), original, 5)
+        self.assertEqual(
+            self.texts(result, original), ["We came here—", "I\u2019m talking to parents—to live happily…"]
+        )
+
+    def test_a_caption_ending_mid_phrase_is_merged_into_the_next_when_both_fit(self):
+        captions = [
+            {"text": "Swamiji's. And he knew", "span": (0, 4), "gu": 3},
+            {"text": "that not all bricks go into the foundation.", "span": (4, 11), "gu": 5},
+            {"text": "We came here—", "span": (11, 14), "gu": 7},
+            {"text": "I'm talking to parents,", "span": (13, 17), "gu": 8},
+            {"text": "and all of you who have come here today from so many places", "span": (17, 30), "gu": 9},
+            {
+                "text": "far and near, to listen to what Swamiji has been saying about it for years now.",
+                "span": (30, 45),
+            },
+        ]
+        merged = cap.join_split_phrases([{"gu": None, **c} for c in captions])
+        self.assertEqual(
+            [c["text"] for c in merged],
+            [
+                "Swamiji's. And he knew that not all bricks go into the foundation.",
+                "We came here—",  # ends at a dash: a natural break, kept
+                "I'm talking to parents,",
+                "and all of you who have come here today from so many places",  # too long to join
+                "far and near, to listen to what Swamiji has been saying about it for years now.",
+            ],
+        )
+        self.assertEqual((merged[0]["span"], merged[0]["gu"]), ((0, 11), 3))
+        dashed = cap.join_split_phrases(
+            [{"text": "We came here", "span": (0, 3), "gu": 1}, {"text": "—I'm here.", "span": (2, 4), "gu": 2}]
+        )
+        self.assertEqual(dashed[0]["text"], "We came here—I'm here.")
 
     def test_unusable_start_words_are_dropped_not_fatal(self):
         reply = json.dumps({"captions": [{"gu": "3", "text": GOOD[0]["text"]}, {"gu": 99, "text": GOOD[1]["text"]}]})
-        self.assertEqual([c["gu"] for c in cap.parse_captions(reply, self.WORDS, 10)], [3, None])
+        self.assertEqual([c["gu"] for c in cap.parse_captions(reply, self.TEXT, 10)], [3, None])
 
     def test_windows_end_at_a_sentence_end(self):
         words = (["word"] * 9 + ["end."]) * 40
@@ -206,10 +253,11 @@ class TestReplies(unittest.TestCase):
 
     def test_an_over_long_caption_is_split_at_its_best_break(self):
         text = "When this gathering was first started by Swamiji, it began with just three boys from the town."
-        pieces = cap.fit([{"text": text, "gu": 4}])
-        self.assertEqual(" ".join(p["text"] for p in pieces), text)
-        self.assertTrue(all(len(p["text"]) <= cap.MAX_CUE_CHARS for p in pieces))
-        self.assertTrue(pieces[0]["text"].endswith("Swamiji,"))
+        pieces = cap.fit([{"chars": [0, len(text)], "gu": 4}], text)
+        texts = self.texts(pieces, text)
+        self.assertEqual(" ".join(texts), text)
+        self.assertTrue(all(len(piece) <= cap.MAX_CUE_CHARS for piece in texts))
+        self.assertTrue(texts[0].endswith("Swamiji,"))
         self.assertEqual([p["gu"] for p in pieces], [4, None])
 
 
@@ -273,6 +321,17 @@ class TestRunCaptions(Base):
         self.make(changed)
         self.assertEqual(len(changed.calls), 1)
         self.assertIn("become grown", self.captions()[0]["text"])
+
+    def test_parts_are_asked_at_the_same_time_and_kept_in_order(self):
+        llm = FakeLLM([lambda user: {"captions": [{"text": " ".join(english_of(user))}]}] * 10)
+        with patch.object(cap, "WINDOW_WORDS", 4), patch.object(cap, "MAX_WINDOW_WORDS", 6):
+            self.make(llm)
+        texts = [c["text"] for c in self.captions()]
+        self.assertGreater(len(llm.calls), 2)
+        self.assertEqual(" ".join(texts), " ".join(EN))
+        self.assertTrue(all(len(english_of(call["user"])) <= 6 for call in llm.calls))
+        later = next(call["user"] for call in llm.calls if "<before>" in call["user"])
+        self.assertIn("The king's", later)
 
     def test_a_failed_request_stops_the_run_so_it_can_resume(self):
         llm = FakeLLM()
