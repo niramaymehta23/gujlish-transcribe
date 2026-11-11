@@ -374,6 +374,10 @@ class TestStoryboards(unittest.TestCase):
         warnings = studio.check_storyboard(board, clip_info())[1]
         self.assertTrue(any("'mango' isn't used" in w for w in warnings))
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("PIL") and importlib.util.find_spec("numpy"),
+        "the studio's image libraries (Pillow, numpy) aren't installed",
+    )
     def test_key_out_clears_the_flat_background_but_keeps_green_inside(self):
         import io
 
