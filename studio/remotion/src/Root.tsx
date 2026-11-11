@@ -18,6 +18,7 @@ const sample: ClipProps = {
   duration: 30,
   hasAudio: false,
   hasVideo: false,
+  style: "paper",
   captions: [
     { text: "This is where the English captions appear.", from: 0, to: 30 },
   ],
@@ -42,8 +43,14 @@ const sample: ClipProps = {
       ],
     },
     {
-      type: "quote",
+      type: "punch",
       from: 13,
+      to: 15,
+      text: "Ego. Jealousy. Worry.",
+    },
+    {
+      type: "quote",
+      from: 15,
       to: 18,
       text: "You cannot cure ego or jealousy with medicine.",
       emphasis: ["ego", "jealousy"],

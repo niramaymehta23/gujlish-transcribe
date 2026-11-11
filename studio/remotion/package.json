@@ -9,6 +9,7 @@
   },
   "private": true,
   "dependencies": {
+    "@phosphor-icons/react": "2.1.10",
     "@remotion/cli": "4.0.541",
     "@remotion/google-fonts": "4.0.541",
     "@remotion/media": "4.0.541",

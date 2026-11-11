@@ -3,6 +3,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("studio_tool", ROOT / "studio" / "tools" / "studio.py")
@@ -66,6 +67,30 @@ class TestSubtitles(unittest.TestCase):
         self.assertEqual(pages[0]["from"], 0.0)
         self.assertLessEqual(pages[-1]["to"], 8.0)
         self.assertNotIn("soul", " ".join(page["text"] for page in pages))
+
+
+class TestSpeechTiming(unittest.TestCase):
+    def test_words_skip_the_pauses_inside_a_cue(self):
+        cues = [{"start": 10.0, "end": 16.0, "text": "aaaa bbbb cccc dddd"}]
+        # he starts a second late, speaks two seconds, pauses one, speaks two more
+        words = studio.speech_words(cues, [(9.0, 11.0), (13.0, 14.0)])
+        self.assertAlmostEqual(words[0]["start"], 11.0)
+        self.assertAlmostEqual(words[1]["end"], 13.0)  # half the letters are said before the pause
+        self.assertAlmostEqual(words[2]["start"], 14.0)  # and the rest after it
+        self.assertAlmostEqual(words[-1]["end"], 16.0)
+
+    def test_a_cue_with_no_pauses_is_shared_evenly(self):
+        cues = [{"start": 0.0, "end": 4.0, "text": "aa bb"}]
+        words = studio.speech_words(cues, [])
+        self.assertEqual([(w["start"], w["end"]) for w in words], [(0.0, 2.0), (2.0, 4.0)])
+
+    def test_pages_break_where_he_pauses(self):
+        cues = [{"start": 0.0, "end": 10.0, "text": "one two three four five six seven eight nine ten eleven twelve"}]
+        words = studio.speech_words(cues, [(5.5, 6.5)])
+        pages = studio.caption_pages(words, 0.0, 10.0, max_chars=48)
+        self.assertGreater(len(pages), 1)
+        self.assertLessEqual(pages[0]["to"], 6.5)
+        self.assertGreaterEqual(pages[1]["from"], 6.4)
 
 
 class TestCaptionEdges(unittest.TestCase):
@@ -142,9 +167,74 @@ class TestClipLimits(unittest.TestCase):
         self.assertEqual({clip["title"] for clip in rejected}, {"Twin", "Other"})
 
 
+class TestSkippedLines(unittest.TestCase):
+    def setUp(self):
+        self.lines = lines_of((0.0, 10.0), (10.0, 20.0), (20.0, 30.0), (30.0, 40.0), (40.0, 50.0))
+
+    def candidate(self, skip, first=1, last=5):
+        item = {"start_line": first, "end_line": last, "format": "short", "score": 8, "title": "C", "skip": skip}
+        return studio.check_candidate(item, self.lines)
+
+    def test_skipped_lines_leave_pieces_and_a_shorter_clip(self):
+        clip = self.candidate([[2, 3]])
+        self.assertIsNone(clip["problem"])
+        self.assertEqual([(s["start"], s["end"]) for s in clip["segments"]], [(0.0, 10.0), (30.0, 50.0)])
+        self.assertEqual(clip["duration"], 30.0)
+        self.assertEqual((clip["start"], clip["end"]), (0.0, 50.0))
+        self.assertNotIn("Line 2.", clip["text"])
+        self.assertEqual(studio.joins_of(clip), [10.0])
+
+    def test_bad_skips(self):
+        self.assertIn("inside the clip", self.candidate([[1, 2]])["problem"])
+        self.assertIn("inside the clip", self.candidate([[4, 5]])["problem"])
+        self.assertIn("overlaps", self.candidate([[2, 3], [3, 4]])["problem"])
+        self.assertIn("pairs", self.candidate([2, 3])["problem"])
+        self.assertIn("too short", self.candidate([[2, 4]])["problem"])
+
+    def test_no_skip_is_one_piece(self):
+        clip = self.candidate(None)
+        self.assertEqual(len(clip["segments"]), 1)
+        self.assertEqual(studio.joins_of(clip), [])
+
+    def test_captions_follow_on_across_a_join(self):
+        words = [
+            {"start": 1.0, "end": 2.0, "text": "Kept."},
+            {"start": 12.0, "end": 13.0, "text": "Skipped."},
+            {"start": 31.0, "end": 32.0, "text": "Later."},
+        ]
+        pages = studio.clip_captions(words, self.candidate([[2, 3]]), 60)
+        self.assertEqual([page["text"] for page in pages], ["Kept.", "Later."])
+        self.assertAlmostEqual(pages[1]["from"], 11.0)
+
+    def test_joined_audio_fades_each_piece_and_concatenates(self):
+        segments = self.candidate([[2, 3]])["segments"]
+        command = studio.audio_command(Path("talk.mp3"), segments, Path("out.m4a"))
+        self.assertEqual(command.count("-i"), 2)
+        graph = command[command.index("-filter_complex") + 1]
+        self.assertIn("concat=n=2:v=0:a=1", graph)
+        self.assertIn("afade=t=out", graph)
+        single = studio.audio_command(Path("talk.mp3"), segments[:1], Path("out.m4a"))
+        self.assertNotIn("-filter_complex", single)
+
+    def test_video_across_a_join_is_warned_about(self):
+        board = {
+            "style": "paper",
+            "scenes": [
+                {"type": "hook", "from": 0, "to": 4, "headline": "Why?"},
+                {"type": "speaker", "from": 4, "to": 30},
+                {"type": "punch", "from": 30, "to": 60, "text": "Now."},
+            ],
+            "post": good_post(),
+        }
+        warnings = studio.check_storyboard(board, clip_info(joins=[12.0]))[1]
+        self.assertTrue(any("join at 12.0s" in w for w in warnings))
+        warnings = studio.check_storyboard(board, clip_info(joins=[40.0]))[1]
+        self.assertFalse(any("join" in w for w in warnings))
+
+
 class TestStoryboards(unittest.TestCase):
     def board(self, *scenes):
-        return {"scenes": list(scenes), "post": good_post()}
+        return {"style": "paper", "scenes": list(scenes), "post": good_post()}
 
     def hook(self, begin, end, **extra):
         return {"type": "hook", "from": begin, "to": end, "headline": "Who cures the soul?", **extra}
@@ -187,12 +277,130 @@ class TestStoryboards(unittest.TestCase):
         self.assertTrue(any("emphasis" in e for e in self.errors(self.hook(0, 60, emphasis=["body"]))))
 
     def test_post_limits(self):
-        board = {"scenes": [self.hook(0, 60)], "post": {**good_post(), "youtube_title": "x" * 101}}
+        board = {**self.board(self.hook(0, 60)), "post": {**good_post(), "youtube_title": "x" * 101}}
         self.assertTrue(any("limit is 100" in e for e in studio.check_storyboard(board, clip_info())[0]))
-        board = {"scenes": [self.hook(0, 60)], "post": {**good_post(), "youtube_title": "a <b>"}}
+        board = {**self.board(self.hook(0, 60)), "post": {**good_post(), "youtube_title": "a <b>"}}
         self.assertTrue(any("rejects" in e for e in studio.check_storyboard(board, clip_info())[0]))
-        board = {"scenes": [self.hook(0, 60)]}
+        board = {"style": "paper", "scenes": [self.hook(0, 60)]}
         self.assertTrue(any("post section" in e for e in studio.check_storyboard(board, clip_info())[0]))
+
+    def test_a_style_is_required(self):
+        board = {**self.board(self.hook(0, 60)), "style": "pastel"}
+        self.assertTrue(any("needs a style" in e for e in studio.check_storyboard(board, clip_info())[0]))
+
+    def test_split_layout_needs_a_video_and_speakers_take_no_layout(self):
+        split = {"type": "punch", "from": 4, "to": 60, "text": "Ego.", "layout": "split"}
+        self.assertEqual(self.errors(self.hook(0, 4), split), [])
+        no_video = self.errors(self.hook(0, 4), split, clip=clip_info(has_video=False))
+        self.assertTrue(any("split scene" in e for e in no_video))
+        self.assertTrue(any("layout must be" in e for e in self.errors(self.hook(0, 60, layout="half"))))
+        speaker = {**self.speaker(4, 60), "layout": "split"}
+        self.assertTrue(any("takes no layout" in e for e in self.errors(self.hook(0, 4), speaker)))
+
+    def test_pacing_warnings(self):
+        scenes = [self.hook(0, 6), {"type": "punch", "from": 6, "to": 20, "text": "Worry."}, self.speaker(20, 60)]
+        warnings = studio.check_storyboard(self.board(*scenes), clip_info())[1]
+        self.assertTrue(any("Scene 1 (hook)" in w and "under 4.5s" in w for w in warnings))
+        self.assertTrue(any("Scene 2 (punch)" in w and "under 8s" in w for w in warnings))
+        self.assertTrue(any("Scene 3 (speaker)" in w and "under 15s" in w for w in warnings))
+
+    def test_icons_are_checked_by_name(self):
+        known = {"heart", "hands-praying", "cube-3-d"}
+        with mock.patch.object(studio, "icon_names", return_value=known):
+            rows = [
+                {"left": "Body", "right": "Doctor", "left_icon": "heart"},
+                {"left": "Soul", "right": "Saint", "icon": "hands-praying"},
+            ]
+            compare = {"type": "compare", "from": 0, "to": 60, "title": "Healers", "rows": rows}
+            self.assertEqual(self.errors(compare), [])
+            rows[1]["icon"] = "halo"
+            self.assertTrue(any("'halo'" in e for e in self.errors(compare)))
+            rows[1]["icon"] = "HandsPraying"
+            self.assertTrue(any("kebab-case" in e for e in self.errors(compare)))
+
+    def test_scenes_take_no_lone_icon(self):
+        with mock.patch.object(studio, "icon_names", return_value={"hands-praying"}):
+            self.assertTrue(
+                any("no longer takes an icon" in e for e in self.errors(self.hook(0, 60, icon="hands-praying")))
+            )
+
+    def test_art_is_one_to_three_known_icons(self):
+        known = {"clock", "coins", "chart-line-up"}
+        with mock.patch.object(studio, "icon_names", return_value=known):
+            self.assertEqual(self.errors(self.hook(0, 60, art=["clock", "coins", "chart-line-up"])), [])
+            self.assertTrue(any("one to three" in e for e in self.errors(self.hook(0, 60, art=[]))))
+            self.assertTrue(any("one to three" in e for e in self.errors(self.hook(0, 60, art=["clock"] * 4))))
+            self.assertTrue(any("'piggy'" in e for e in self.errors(self.hook(0, 60, art=["piggy"]))))
+            speaker = {**self.speaker(4, 60), "art": ["clock"]}
+            self.assertTrue(any("takes no art" in e for e in self.errors(self.hook(0, 4), speaker)))
+
+    def test_picture_scenes(self):
+        known = {"orange", "crown"}
+        picture = {"type": "picture", "from": 4, "to": 10, "setting": "arch", "hero": "orange", "title": "A mango"}
+        with mock.patch.object(studio, "icon_names", return_value=known):
+            self.assertEqual(self.errors(self.hook(0, 4), {**picture, "to": 60}), [])
+            bad = {**picture, "to": 60, "setting": "forest", "effect": "snow"}
+            errors = self.errors(self.hook(0, 4), bad)
+            self.assertTrue(any("needs a setting" in e for e in errors))
+            self.assertTrue(any("effect must be" in e for e in errors))
+            empty = {"type": "picture", "from": 4, "to": 60, "setting": "sky"}
+            self.assertTrue(any("needs something on it" in e for e in self.errors(self.hook(0, 4), empty)))
+            chips = {**picture, "to": 60, "chips": [{"text": "x" * 27}]}
+            self.assertTrue(any("over 26" in e for e in self.errors(self.hook(0, 4), chips)))
+            self.assertTrue(
+                any("'nope'" in e for e in self.errors(self.hook(0, 4), {**picture, "to": 60, "hero": "nope"}))
+            )
+
+    def test_generated_pictures_stand_in_for_icons_in_art_and_hero(self):
+        board = self.board(self.hook(0, 4, art=["mango", "clock"]), {**self.speaker(4, 60)})
+        board["pictures"] = {"mango": "a ripe golden Alphonso mango with one green leaf"}
+        with mock.patch.object(studio, "icon_names", return_value={"clock"}):
+            self.assertEqual(studio.check_storyboard(board, clip_info())[0], [])
+            board["pictures"] = {}
+            self.assertTrue(any("'mango'" in e for e in studio.check_storyboard(board, clip_info())[0]))
+
+    def test_generated_pictures_never_show_people(self):
+        names, errors = studio._check_pictures({"court": "King Akbar on his throne in a grand court"})
+        self.assertEqual(names, set())
+        self.assertTrue(any("would show a person" in e for e in errors))
+        names, errors = studio._check_pictures({"shawl": "a richly embroidered golden shawl, folded"})
+        self.assertEqual((names, errors), ({"shawl"}, []))
+        self.assertTrue(studio._check_pictures({"Gold Chain": "a heavy gold chain necklace"})[1])
+        self.assertTrue(studio._check_pictures({"tv": "tv"})[1])
+
+    def test_unused_pictures_are_flagged(self):
+        board = self.board(self.hook(0, 4), self.speaker(4, 60))
+        board["pictures"] = {"mango": "a ripe golden Alphonso mango with one green leaf"}
+        warnings = studio.check_storyboard(board, clip_info())[1]
+        self.assertTrue(any("'mango' isn't used" in w for w in warnings))
+
+    def test_key_out_clears_the_flat_background_but_keeps_green_inside(self):
+        import io
+
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (200, 200), (0, 255, 0))
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((40, 40, 160, 160), fill="white")  # the sticker's white edge
+        draw.ellipse((70, 70, 130, 130), fill=(60, 170, 60))  # a green leaf inside it
+        draw.ellipse((95, 20, 105, 30), fill=(0, 255, 0))  # key green trapped inside: cleared
+        draw.ellipse((90, 90, 110, 110), fill=(0, 250, 5))  # a hole of background inside: cleared
+        draw.rectangle((2, 190, 6, 194), fill="white")  # a stray speck: dropped
+        raw = io.BytesIO()
+        image.save(raw, "PNG")
+        out = studio.key_out(raw.getvalue())
+        self.assertEqual(out.size, (1024, 1024))
+        self.assertEqual(out.getpixel((5, 5))[3], 0)
+        self.assertEqual(out.getpixel((512, 512))[3], 0)  # the hole
+        self.assertEqual(out.getpixel((512, 380))[3], 255)  # the leaf around it
+        self.assertGreater(out.getpixel((512, 380))[1], 150)
+
+    def test_icon_names_come_from_the_installed_package(self):
+        names = studio.icon_names()
+        if names is None:
+            self.skipTest("Remotion's packages aren't installed")
+        self.assertIn("hands-praying", names)
+        self.assertIn("first-aid-kit", names)
 
 
 if __name__ == "__main__":
