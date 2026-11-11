@@ -1,7 +1,8 @@
 # Channel profile
 
-Copy this file to `data/channel.md` (kept out of Git) and describe your channel. The translation uses it to spell names and
-terms, and the Summary & YouTube step and the studio use it so titles, descriptions and clip choices fit the channel.
+Copy this file to `data/channel.md` and describe your channel (the repository ships the Harisena one). The translation
+uses it to spell names and terms, and the Summary & YouTube step and the studio use it so titles, descriptions and clip
+choices fit the channel.
 Changing it means the next translation starts again from the beginning, so the new spellings are used throughout.
 
 - **Channel:** NAME, what it posts.

@@ -22,10 +22,11 @@ dist/
 *.pem
 *.key
 .DS_Store
-# Everything private lives in data/: recordings, transcripts, channel.md, youtube_footer.txt and the correction
-# dictionary. Only the empty folder is shared. The root entries catch files left in the old places.
+# Everything private lives in data/: recordings, transcripts, youtube_footer.txt and the correction dictionary.
+# Only the folder and the Harisena channel profile are shared. The root entries catch files left in the old places.
 data/*
 !data/.gitkeep
+!data/channel.md
 /recordings/
 /transcripts/
 /plots/
@@ -33,13 +34,14 @@ data/*
 /youtube_footer.txt
 /dictionary.json
 /dictionary-clips/
-# The studio's talks, media and channel rules; only its tools and instructions are shared.
+# The studio's talks and media; its tools, instructions and the Harisena clip rules are shared.
 studio/inbox/*
 !studio/inbox/.gitkeep
 studio/talks/*
 !studio/talks/.gitkeep
 studio/rules/*
 !studio/rules/*.example.md
+!studio/rules/clip_rules.md
 studio/remotion/node_modules/
 studio/remotion/out/
 # Model weights and local exports should never be committed accidentally.
