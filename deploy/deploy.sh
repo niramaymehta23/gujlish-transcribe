@@ -30,8 +30,9 @@ gcloud builds submit --project "$PROJECT_ID" --region "$REGION" --config deploy/
   --substitutions "_IMAGE=$tag,_CACHE=$IMAGE:latest,_MODELS=$MODELS" .
 
 # The GPU job. One task, no retries (a failed run waits for you to resume it), and a hard time limit; the website
-# sets a shorter one for each recording from its length.
-gcloud run jobs deploy "$GPU_JOB" --project "$PROJECT_ID" --region "$REGION" --image "$tag" \
+# sets a shorter one for each recording from its length. A GPU job allowed over an hour is a beta Cloud Run feature,
+# so the job is deployed with `gcloud beta` (gcloud components install beta).
+gcloud beta run jobs deploy "$GPU_JOB" --project "$PROJECT_ID" --region "$REGION" --image "$tag" \
   --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy --cpu 4 --memory 16Gi \
   --tasks 1 --parallelism 1 --max-retries 0 --task-timeout 3h \
   --command python --args scripts/run_job.py \

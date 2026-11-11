@@ -37,6 +37,7 @@ Visitors are told apart by a signed cookie. Someone who clears their cookies or 
 3. **Install the gcloud CLI** and sign in:
    ```bash
    brew install --cask google-cloud-sdk
+   gcloud components install beta   # the GPU job runs up to 3 hours, a beta Cloud Run feature
    gcloud auth login
    ```
 4. **Hugging Face token.** At [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with **read** access. The build uses it to download the models.
