@@ -99,9 +99,13 @@ class CloudRunJobs:
 
 
 def _epoch(stamp: str | None) -> float | None:
+    """Seconds since 1970 from a Cloud Run time such as "2026-11-11T12:00:00.123456789Z". Its fraction can have nine
+    digits, which datetime.fromisoformat rejects before Python 3.11, so it is cut to six."""
     if not stamp:
         return None
-    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    main, _, fraction = stamp.rstrip("Z").partition(".")
+    fraction = (fraction + "000000")[:6]
+    return datetime.fromisoformat(f"{main}.{fraction}+00:00").timestamp()
 
 
 class RemoteRun:

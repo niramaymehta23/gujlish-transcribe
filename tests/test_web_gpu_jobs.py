@@ -133,6 +133,13 @@ class RunRemoteTest(unittest.TestCase):
         self.assertGreaterEqual(self.jobs.clock.now - start, 300)
         self.assertLess(self.jobs.clock.now - start, 330)
 
+    def test_cloud_run_times(self):
+        from web.cloudjobs import _epoch
+
+        self.assertEqual(_epoch("2026-11-11T12:00:00.123456789Z"), _epoch("2026-11-11T12:00:00.123456Z"))
+        self.assertEqual(_epoch("2026-11-11T12:00:00Z"), 1_794_398_400.0)
+        self.assertIsNone(_epoch(None))
+
     def test_time_limits(self):
         self.assertEqual(gpu_timeout(60), 30 * 60)
         self.assertEqual(gpu_timeout(3600), 20 * 60 + 3600)
