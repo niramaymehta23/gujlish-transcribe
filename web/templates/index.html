@@ -29,7 +29,7 @@
     </div>
     <div id="runs-pane" class="side-pane"><div id="history" class="runs"><p class="muted">Loading…</p></div></div>
     <div id="dict-pane" class="side-pane" hidden>
-      <p class="muted dict-intro">Fixes you save are applied to every new transcript before its Gujlish and English are made.</p>
+      <p class="muted dict-intro">Fixes you save are looked for in every new transcript. <b>Asks</b>: the words are marked for you to accept or reject. <b>Always</b>: they are replaced without asking. Click to switch.</p>
       <div id="dictionary"></div>
       <details id="spellings" hidden><summary class="muted">Gujlish spellings · <span id="spelling-count"></span></summary><div id="spelling-list"></div></details>
     </div>
@@ -94,7 +94,9 @@
 <div id="drop-overlay" class="drop-overlay" hidden><p>Drop to add this recording</p></div>
 <div id="editor" class="editor" role="dialog" aria-labelledby="ed-title" hidden>
   <div class="editor-head"><strong id="ed-title">Fix words</strong><button id="ed-close" class="ed-close" type="button" aria-label="Close">×</button></div>
-  <p class="heard"><span class="muted">Heard</span> <span id="ed-heard" lang="gu"></span> <span id="ed-heard-latin" class="muted"></span></p>
+  <div id="ed-suggestion" class="ed-suggestion" hidden><span>Your dictionary suggests <b id="ed-suggested" lang="gu"></b> here.</span><button id="ed-dismiss" class="secondary" type="button">Not here, keep as heard</button></div>
+  <p class="heard"><button id="ed-play" class="play" type="button" title="Play these words" aria-label="Play these words">&#9654;</button><span class="muted">Heard</span> <span id="ed-heard" lang="gu"></span> <span id="ed-heard-latin" class="muted"></span></p>
+  <p id="ed-play-note" class="ed-play-note muted" aria-live="polite"></p>
   <div class="ed-extend"><button id="ed-left" class="secondary" type="button">+ word before</button><button id="ed-right" class="secondary" type="button">+ word after</button></div>
   <label class="field-label" for="ed-gu">Correct Gujarati</label><input id="ed-gu" lang="gu" autocomplete="off" spellcheck="false">
   <label class="field-label" for="ed-latin">Correct Gujlish</label><input id="ed-latin" autocomplete="off" spellcheck="false" placeholder="Type in English letters to get Gujarati">
@@ -102,6 +104,7 @@
   <p id="ed-effect" class="ed-effect" aria-live="polite"></p>
   <label class="check" id="ed-all-row"><input type="checkbox" id="ed-all" checked><span>Also fix the other <span id="ed-count"></span> in this recording</span></label>
   <label class="check"><input type="checkbox" id="ed-remember" checked><span>Remember for future recordings</span></label>
+  <label class="check sub" id="ed-always-row"><input type="checkbox" id="ed-always"><span>Fix it in future without asking (only for words that can’t be right anywhere)</span></label>
   <p id="ed-error" class="ed-error" role="alert"></p>
   <div class="editor-actions"><button id="ed-cancel" class="secondary" type="button">Cancel</button><button id="ed-save" class="primary" type="button">Replace</button></div>
 </div>

@@ -33,7 +33,18 @@ from transcriber.english.llm import gemini_available
 from transcriber.files.storage import ROOT, new_run, run_paths, stage_paths
 from transcriber.files.subtitles import to_srt
 from transcriber.files.textutil import fmt_time, write_json
-from transcriber.speech.dictionary import clips_dir, dictionary_path, forget, remember, save_clip
+from transcriber.speech import align
+from transcriber.speech.dictionary import (
+    clip_audio,
+    clips_dir,
+    dictionary_path,
+    forget,
+    mode,
+    reject,
+    remember,
+    save_clip,
+    set_mode,
+)
 from transcriber.speech.dictionary import load as load_dictionary
 from transcriber.speech.dictionary import save as save_dictionary
 from transcriber.speech.edits import load_gujlish, matches, replace_words, save_transcript
@@ -53,6 +64,8 @@ OWNER_FILE = ".owner"
 RUN_FILE = ".run.json"  # the recording, its settings, and the steps still to finish
 MAX_RESUMES = 3  # restarts in a row after which cut-short work waits for you instead of resuming itself
 STOP_GRACE_SECONDS = 10  # a stopped worker is killed if it is still running after this
+WORD_PAD = 0.4  # seconds of audio played around words whose times are known (a little of the next word helps)
+ROUGH_PAD = 1.0  # and around words whose times are estimated
 LEFTOVER_SECONDS = 3600  # unused recordings and empty run folders younger than this may belong to an upload under way
 EVENT_PREFIX = "ASR_EVENT "
 STOPPED = "Stopped. Start it again to continue where it left off."
@@ -222,6 +235,9 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     lock = Lock()
     meta_lock = Lock()  # RUN_FILE is read, changed and written back from several threads
     edit_lock = Lock()  # one word fix at a time: each rewrites the transcript files and may save the dictionary
+    align_lock = Lock()  # one line aligned at a time, on the CPU, with one copy of the model
+    aligner: dict = {}  # "model": the Aligner (None when it can't load), loaded the first time a word is played
+    aligned: dict = {}  # word times of lines aligned here, by transcript and line
     xlit = []  # the IndicXlit engine for editor suggestions, loaded on first use
     # Transcription needs the GPU, one recording at a time. Gujlish and the Gemini stages need neither.
     gpu = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="asr-gpu")
@@ -850,7 +866,13 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         gujlish, _ = load_gujlish(paths["gujlish_json"], segments)
         view = {
             "segments": [
-                {"start": s["start"], "end": s["end"], "text": s.get("text", ""), "fixes": s.get("fixes", [])}
+                {
+                    "start": s["start"],
+                    "end": s["end"],
+                    "text": s.get("text", ""),
+                    "fixes": s.get("fixes", []),
+                    "suggestions": s.get("suggestions", []),
+                }
                 for s in segments
             ],
             "gujlish_tokens": gujlish,
@@ -1075,24 +1097,134 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 write_gujlish(transcript_json, data, gujlish, engine)
             clip = None
             if body.get("remember", True):
-                seconds = segment["end"] - segment["start"]
-                example = {
-                    "recording": data.get("source"),
-                    "run": transcript_json.parent.name,
-                    "start": segment["start"],
-                    "end": segment["end"],
-                    "at": round(segment["start"] + seconds * len(" ".join(tokens[:start])) / max(1, len(context)), 2),
-                    "context": context,
-                }
-                rule = remember(dictionary, heard, correct, heard_gujlish, " ".join(latin), example)
-                recording = Path(job.get("source") or "")
-                if rule and recording.is_file():
-                    example["clip"] = f"{rule['id']}-{uuid4().hex[:6]}.ogg"
-                    clip = (recording, segment["start"], segment["end"], clips_dir() / example["clip"])
+                example = evidence(data, transcript_json, segment, context, start)
+                always = bool(body.get("always"))
+                rule = remember(dictionary, heard, correct, heard_gujlish, " ".join(latin), example, always)
+                clip = keep_clip(job, rule, example)
                 save_dictionary(dictionary)
         if clip:
             Thread(target=save_clip, args=clip, daemon=True).start()
         return jsonify(replaced=len(places), remembered=bool(body.get("remember", True)))
+
+    def evidence(data: dict, transcript_json: Path, segment: dict, context: str, start: int) -> dict:
+        """Where a fix (or a rejected suggestion) happened: the recording, the sentence as heard and roughly when the
+        word was said (estimated from its place in the sentence: the recognizer gives no word times)."""
+        tokens, seconds = context.split(), segment["end"] - segment["start"]
+        return {
+            "recording": data.get("source"),
+            "run": transcript_json.parent.name,
+            "start": segment["start"],
+            "end": segment["end"],
+            "at": round(segment["start"] + seconds * len(" ".join(tokens[:start])) / max(1, len(context)), 2),
+            "context": context,
+        }
+
+    def keep_clip(job: dict, rule: dict, example: dict):
+        """Name the audio clip for this example and return what save_clip needs to cut it, or None."""
+        recording = Path(job.get("source") or "")
+        if not rule or not recording.is_file():
+            return None
+        example["clip"] = f"{rule['id']}-{uuid4().hex[:6]}.ogg"
+        return recording, example["start"], example["end"], clips_dir() / example["clip"]
+
+    @app.post("/api/jobs/<job_id>/dismiss")
+    def dismiss_suggestion(job_id):
+        """Reject a dictionary suggestion in one place: the words stay as heard, and the dictionary keeps this place
+        (sentence and audio clip) as a time the fix was wrong."""
+        with lock:
+            job = dict(find_job(job_id))
+        body = request.get_json(silent=True) or {}
+        try:
+            number, start, end, rule_id = int(body["segment"]), int(body["start"]), int(body["end"]), str(body["rule"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify(error="Choose the suggestion to dismiss."), 400
+        if job.get("status") != "complete" or not job.get("json"):
+            return jsonify(error="Finish the transcript first."), 409
+        clip = None
+        with edit_lock:
+            transcript_json = Path(job["json"])
+            data = json.loads(transcript_json.read_text(encoding="utf-8"))
+            segments = data["segments"]
+            segment = segments[number] if 0 <= number < len(segments) else {}
+            suggestions = segment.get("suggestions", [])
+            found = next(
+                (s for s in suggestions if (s["start"], s["end"], s.get("rule")) == (start, end, rule_id)), None
+            )
+            if found is None:
+                return jsonify(error="This part of the transcript has changed. Reload the page and try again."), 409
+            suggestions.remove(found)
+            if not suggestions:
+                segment.pop("suggestions", None)
+            save_transcript(transcript_json, data)
+            dictionary = load_dictionary()
+            example = evidence(data, transcript_json, segment, segment.get("text", ""), start)
+            rule = reject(dictionary, rule_id, example)
+            if rule:
+                clip = keep_clip(job, rule, example)
+                save_dictionary(dictionary)
+        if clip:
+            Thread(target=save_clip, args=clip, daemon=True).start()
+        return jsonify(dismissed=True)
+
+    def line_word_times(transcript_json: Path, segment: dict, recording: Path) -> list[dict] | None:
+        """When each word of a transcript line is said: from the caption step's alignment, else by aligning the line
+        now (about half a second on the CPU, plus loading the model the first time), else None."""
+        saved = align.load_word_times(transcript_json, [segment])[0]
+        if saved:
+            return saved
+        key = json.dumps([str(transcript_json), segment["start"], segment["end"], segment["text"]], ensure_ascii=False)
+        with align_lock:
+            if key not in aligned:
+                if "model" not in aligner:
+                    try:
+                        aligner["model"] = align.Aligner()
+                    except (ImportError, OSError, RuntimeError, ValueError):
+                        aligner["model"] = None
+                times = None
+                if aligner["model"] is not None:
+                    start, end = float(segment["start"]), float(segment["end"])
+                    try:
+                        samples = align.read_audio(recording, start, end)
+                        times = aligner["model"].align(samples, start, end, segment["text"])
+                    except (OSError, RuntimeError, ValueError):
+                        times = None
+                if len(aligned) >= 1000:
+                    aligned.clear()
+                aligned[key] = times
+            return aligned[key]
+
+    @app.get("/api/jobs/<job_id>/word-audio")
+    def word_audio(job_id):
+        """The moment words [start, end) of a line are said, as a short WAV, so a fix or a dictionary suggestion can
+        be judged by ear. When the words can't be timed, their place in the line is estimated and more audio is
+        kept around them (the X-Word-Timing header says which)."""
+        with lock:
+            job = dict(find_job(job_id))
+        try:
+            number, start, end = (int(request.args[name]) for name in ("segment", "start", "end"))
+        except (KeyError, ValueError):
+            return jsonify(error="Choose the words to play."), 400
+        recording = Path(job.get("source") or "")
+        if job.get("status") != "complete" or not job.get("json") or not recording.is_file():
+            return jsonify(error="The recording isn't available."), 404
+        transcript_json = Path(job["json"])
+        segments = json.loads(transcript_json.read_text(encoding="utf-8")).get("segments", [])
+        segment = segments[number] if 0 <= number < len(segments) else {}
+        if not 0 <= start < end <= len(segment.get("text", "").split()):
+            return jsonify(error="This part of the transcript has changed. Reload the page and try again."), 409
+        times = line_word_times(transcript_json, segment, recording)
+        exact = times is not None
+        if not exact:
+            times = align.estimate_times(segment["text"], float(segment["start"]), float(segment["end"]))
+        pad = WORD_PAD if exact else ROUGH_PAD
+        first, last = max(0.0, round(times[start]["start"] - pad, 3)), round(times[end - 1]["end"] + pad, 3)
+        audio = clip_audio(recording, first, last)
+        if audio is None:
+            return jsonify(error="Could not cut this part of the recording."), 500
+        response = send_file(BytesIO(audio), mimetype="audio/wav", download_name="words.wav")
+        response.headers["X-Word-Timing"] = "aligned" if exact else "estimated"
+        response.headers["Cache-Control"] = "private, max-age=300"
+        return response
 
     @app.get("/api/transliterate")
     def transliterate_text():
@@ -1112,7 +1244,12 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         data = load_dictionary()
         fields = ("id", "heard", "heard_gujlish", "correct", "correct_gujlish", "added")
         corrections = [
-            {**{key: rule.get(key) for key in fields}, "examples": len(rule.get("examples", []))}
+            {
+                **{key: rule.get(key) for key in fields},
+                "mode": mode(rule),
+                "examples": len(rule.get("examples", [])),
+                "rejected": len(rule.get("rejected", [])),
+            }
             for rule in reversed(data["corrections"])
         ]
         return jsonify(corrections=corrections, gujlish=data["gujlish"])
@@ -1123,6 +1260,17 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         with edit_lock:
             data = load_dictionary()
             if not forget(data, correction=body.get("correction"), gujlish=body.get("gujlish")):
+                abort(404)
+            save_dictionary(data)
+        return jsonify(ok=True)
+
+    @app.post("/api/dictionary/mode")
+    def dictionary_mode():
+        """Switch a correction between asking before each fix ("ask") and fixing without asking ("always")."""
+        body = request.get_json(silent=True) or {}
+        with edit_lock:
+            data = load_dictionary()
+            if not set_mode(data, str(body.get("correction", "")), str(body.get("mode", ""))):
                 abort(404)
             save_dictionary(data)
         return jsonify(ok=True)

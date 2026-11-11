@@ -184,10 +184,12 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
     transcript = merge_segments(segments)
     if args.dictionary:
         # After merging, so the fix positions it records match the final segment text.
-        fixed = apply_corrections(segments, load_dictionary(args.dictionary.expanduser())["corrections"])
+        fixed, suggested = apply_corrections(segments, load_dictionary(args.dictionary.expanduser())["corrections"])
         if fixed:
             print(f"Dictionary: fixed {fixed} word(s)", flush=True)
             transcript = transcript_text(segments)
+        if suggested:
+            print(f"Dictionary: {suggested} suggested fix(es) to review", flush=True)
     flagged = [s for s in segments if s.get("flags")]
     if flagged:
         times = ", ".join(f"{s['start']:.0f}s" for s in flagged[:10])
@@ -254,7 +256,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--vocab", type=Path, help="JSON mapping preferred words to explicit ASR variants")
     parser.add_argument(
-        "--dictionary", type=Path, help="Correction dictionary saved by the web app (dictionary.json); fixes words"
+        "--dictionary",
+        type=Path,
+        help="Correction dictionary saved by the web app (dictionary.json): fixes the words set to always and marks the rest as suggestions",
     )
     parser.add_argument("--gujlish", action="store_true", help="After transcribing, also write the Gujlish version")
     parser.add_argument("--plot", action="store_true", help="After Gujlish transcription, write one confidence plot")

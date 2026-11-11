@@ -413,8 +413,9 @@ function renderWords(panel, latin) {
   if (!latin || current.gujlish_tokens) current.segments.forEach((segment, index) => {
     const list = segmentWords(index, latin);
     if (!list.length) return;
-    const fixed = new Map();
+    const fixed = new Map(), suggested = new Map();
     for (const fix of segment.fixes || []) for (let i = fix.start; i < fix.end; i++) fixed.set(i, fix.heard);
+    for (const hint of segment.suggestions || []) for (let i = hint.start; i < hint.end; i++) suggested.set(i, hint);
     const row = document.createElement('div'); row.className = 'line';
     const stamp = document.createElement('span'); stamp.className = 'stamp'; stamp.textContent = time(segment.start);
     const line = document.createElement('p'); line.className = 'words'; line.dataset.seg = index;
@@ -423,6 +424,7 @@ function renderWords(panel, latin) {
       if (i) line.append(' ');
       const span = document.createElement('span'); span.className = 'w'; span.dataset.i = i; span.textContent = word;
       if (fixed.has(i)) { span.classList.add('fixed'); span.title = `Fixed by your dictionary · heard “${fixed.get(i)}”`; }
+      if (suggested.has(i)) { span.classList.add('suggested'); span.title = `Your dictionary suggests “${suggested.get(i).correct}” · click to accept or reject`; }
       line.append(span);
     });
     row.append(stamp, line); rows.push(row);
@@ -589,16 +591,23 @@ function fillEditor(keepTyped) {
   $('ed-all-row').hidden = others < 1; $('ed-count').textContent = others === 1 ? '1 place' : `${others} places`;
   $('ed-left').disabled = sel.start === 0;
   $('ed-right').disabled = sel.end >= segmentWords(sel.seg, false).length;
+  stopWords(); $('ed-play-note').textContent = '';
   describeEdit(); markSelection(); placeEditor();
 }
 function openEditor() {
   touched = { gu: false, latin: false }; $('ed-suggest').replaceChildren(); $('ed-error').textContent = '';
-  $('ed-all').checked = true; $('ed-remember').checked = true; $('editor').hidden = false;
-  fillEditor(false);
+  const hint = sel.suggestion;
+  $('ed-all').checked = !hint; $('ed-remember').checked = true; $('ed-always').checked = false; $('editor').hidden = false;
+  $('ed-always-row').hidden = false;
+  $('ed-suggestion').hidden = !hint; $('ed-title').textContent = hint ? 'Dictionary suggestion' : 'Fix words';
+  $('ed-save').textContent = hint ? 'Accept' : 'Replace';
+  if (hint) { $('ed-suggested').textContent = hint.correct; $('ed-gu').value = hint.correct; $('ed-latin').value = hint.correct_gujlish || ''; touched = { gu: true, latin: Boolean(hint.correct_gujlish) }; }
+  fillEditor(Boolean(hint));
+  if (hint && !hint.correct_gujlish) { $('ed-latin').value = ''; suggest('latin'); }  // never pair the heard spelling with the new word
   const input = tab === 'gujlish' ? $('ed-latin') : $('ed-gu');
   input.focus(); input.select();
 }
-function closeEditor() { $('editor').hidden = true; sel = null; markSelection(); }
+function closeEditor() { stopWords(); $('editor').hidden = true; sel = null; markSelection(); }
 function placeEditor() {
   const editor = $('editor');
   if (editor.hidden || !sel || narrow()) return;  // phones: a bottom sheet
@@ -609,13 +618,21 @@ function placeEditor() {
   editor.style.left = `${window.scrollX + Math.max(8, Math.min(box.left, right))}px`;
   editor.style.top = `${window.scrollY + below}px`;
 }
-function pick(seg, start, end) { sel = { seg, start, end }; openEditor(); }
+function pick(seg, start, end, suggestion = null) { sel = { seg, start, end, suggestion }; openEditor(); }
+function suggestionAt(seg, i) { return (current.segments[seg].suggestions || []).find(hint => i >= hint.start && i < hint.end) || null; }
+function leaveSuggestion() {  // the words were changed by hand: an ordinary fix from here on
+  if (!sel.suggestion) return;
+  sel.suggestion = null; touched = { gu: false, latin: false };  // start from the words as heard, not the suggested ones
+  $('ed-suggestion').hidden = true; $('ed-title').textContent = 'Fix words'; $('ed-save').textContent = 'Replace';
+}
 for (const id of WORD_TABS) {
   $(id).addEventListener('click', e => {
     const word = e.target.closest('.w');
     if (!word || !current || !window.getSelection().isCollapsed) return;  // a drag is handled on mouseup
     const seg = Number(word.parentElement.dataset.seg), i = Number(word.dataset.i);
+    const hint = suggestionAt(seg, i);
     if (e.shiftKey && sel && sel.seg === seg) pick(seg, Math.min(sel.start, i), Math.max(sel.end, i + 1));
+    else if (hint) pick(seg, hint.start, hint.end, hint);
     else pick(seg, i, i + 1);
   });
   $(id).addEventListener('mouseup', () => {
@@ -635,8 +652,56 @@ window.addEventListener('resize', placeEditor);
 document.addEventListener('mousedown', e => {
   if (!$('editor').hidden && !e.target.closest('#editor') && !e.target.closest('.w')) closeEditor();
 });
-$('ed-left').addEventListener('click', () => { sel.start--; fillEditor(true); });
-$('ed-right').addEventListener('click', () => { sel.end++; fillEditor(true); });
+$('ed-left').addEventListener('click', () => { leaveSuggestion(); sel.start--; fillEditor(true); });
+$('ed-right').addEventListener('click', () => { leaveSuggestion(); sel.end++; fillEditor(true); });
+$('ed-remember').addEventListener('change', () => { $('ed-always-row').hidden = !$('ed-remember').checked; });
+$('ed-dismiss').addEventListener('click', async () => {
+  const hint = sel && sel.suggestion;
+  if (!hint) return;
+  $('ed-dismiss').disabled = true; $('ed-error').textContent = '';
+  try {
+    const response = await postJson(`/api/jobs/${jobId}/dismiss`, { segment: sel.seg, start: hint.start, end: hint.end, rule: hint.rule });
+    if (signedOut(response)) return;
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) { $('ed-error').textContent = data.error || 'Could not dismiss this suggestion.'; return; }
+    closeEditor();
+    note('Kept as heard · your dictionary notes this place as one where the fix was wrong');
+    pollFailures = 0; await poll(); loadDictionary();
+  } catch { $('ed-error').textContent = `Could not reach ${SERVER}.`; }
+  finally { $('ed-dismiss').disabled = false; }
+});
+// ▶ in the editor: hear just the chosen words, cut from the recording where they are said.
+let wordAudio = null, wordTicket = 0;
+function stopWords() {
+  wordTicket++;
+  if (wordAudio) { wordAudio.pause(); URL.revokeObjectURL(wordAudio.src); wordAudio = null; }
+  $('ed-play').classList.remove('busy', 'on');
+}
+$('ed-play').addEventListener('click', async () => {
+  if (!sel || !jobId) return;
+  const playingNow = Boolean(wordAudio);
+  stopWords();
+  if (playingNow) return;  // a second click stops it
+  const ticket = wordTicket, button = $('ed-play');
+  button.classList.add('busy'); $('ed-play-note').textContent = 'Finding the words in the recording…';
+  try {
+    const params = new URLSearchParams({ segment: sel.seg, start: sel.start, end: sel.end });
+    const response = await fetch(`/api/jobs/${jobId}/word-audio?${params}`);
+    if (signedOut(response) || ticket !== wordTicket) return;
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      $('ed-play-note').textContent = data.error || 'Could not play this part.'; return;
+    }
+    const rough = response.headers.get('X-Word-Timing') === 'estimated', blob = await response.blob();
+    if (ticket !== wordTicket) return;
+    wordAudio = new Audio(URL.createObjectURL(blob));
+    wordAudio.addEventListener('ended', () => { if (ticket === wordTicket) stopWords(); });
+    $('ed-play-note').textContent = rough ? 'Couldn’t pin these words down exactly, so you’ll hear a little around them.' : '';
+    button.classList.add('on');
+    await wordAudio.play();
+  } catch { if (ticket === wordTicket) { stopWords(); $('ed-play-note').textContent = 'Could not play this part.'; } }
+  finally { button.classList.remove('busy'); }
+});
 $('ed-close').addEventListener('click', closeEditor);
 $('ed-cancel').addEventListener('click', closeEditor);
 function chips(options) {
@@ -684,7 +749,9 @@ async function saveEdit() {
   const body = {
     segment: sel.seg, start: sel.start, end: sel.end, heard, correct, correct_gujlish: latin,
     everywhere: !$('ed-all-row').hidden && $('ed-all').checked, remember: $('ed-remember').checked,
+    always: $('ed-remember').checked && $('ed-always').checked,
   };
+  const accepted = Boolean(sel.suggestion);
   $('ed-save').disabled = true; $('ed-error').textContent = '';
   try {
     const response = await postJson(`/api/jobs/${jobId}/edit`, body);
@@ -692,7 +759,7 @@ async function saveEdit() {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) { $('ed-error').textContent = data.error || 'Could not save this fix.'; return; }
     closeEditor();
-    note(`Fixed ${data.replaced === 1 ? '1 place' : `${data.replaced} places`}${data.remembered ? ' · saved to your dictionary' : ''}`);
+    note(`${accepted ? 'Accepted' : 'Fixed'} ${data.replaced === 1 ? '1 place' : `${data.replaced} places`}${data.remembered ? ' · saved to your dictionary' : ''}`);
     pollFailures = 0; await poll(); loadDictionary();
   } catch { $('ed-error').textContent = `Could not reach ${SERVER}.`; }
   finally { $('ed-save').disabled = false; }
@@ -705,8 +772,11 @@ async function loadDictionary() {
     if (signedOut(response) || !response.ok) return;
     const data = await response.json();
     $('dict-count').textContent = data.corrections.length || '';
-    const rows = data.corrections.map(rule => dictionaryRow(`${rule.heard} → ${rule.correct}`,
-      rule.heard_gujlish && rule.correct_gujlish ? `${rule.heard_gujlish} → ${rule.correct_gujlish}` : '', { correction: rule.id }));
+    const rows = data.corrections.map(rule => {
+      const detail = [rule.heard_gujlish && rule.correct_gujlish ? `${rule.heard_gujlish} → ${rule.correct_gujlish}` : '',
+        rule.rejected ? `wrong in ${rule.rejected} place${rule.rejected === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
+      return dictionaryRow(`${rule.heard} → ${rule.correct}`, detail, { correction: rule.id }, rule);
+    });
     if (!rows.length) { const p = document.createElement('p'); p.className = 'muted'; p.textContent = 'No fixes yet. Click a word in a transcript to fix it.'; rows.push(p); }
     $('dictionary').replaceChildren(...rows);
     const spellings = Object.entries(data.gujlish);
@@ -714,7 +784,18 @@ async function loadDictionary() {
     $('spelling-list').replaceChildren(...spellings.map(([gujarati, latin]) => dictionaryRow(`${gujarati} = ${latin}`, '', { gujlish: gujarati })));
   } catch { /* the list refreshes on the next fix */ }
 }
-function dictionaryRow(text, detail, forget) {
+function modeButton(rule) {
+  const button = document.createElement('button'); button.type = 'button';
+  const always = rule.mode === 'always';
+  button.className = always ? 'mode always' : 'mode'; button.textContent = always ? 'Always' : 'Asks';
+  button.title = always ? 'Replaced in new transcripts without asking. Click to be asked each time instead.'
+    : 'Marked in new transcripts for you to accept or reject. Click to replace it without asking.';
+  button.onclick = async () => {
+    try { const response = await postJson('/api/dictionary/mode', { correction: rule.id, mode: always ? 'ask' : 'always' }); if (!signedOut(response)) loadDictionary(); } catch { /* retry by clicking again */ }
+  };
+  return button;
+}
+function dictionaryRow(text, detail, forget, rule = null) {
   const row = document.createElement('div'); row.className = 'dict-item';
   const label = document.createElement('div');
   const main = document.createElement('span'); main.lang = 'gu'; main.textContent = text; label.append(main);
@@ -725,7 +806,8 @@ function dictionaryRow(text, detail, forget) {
     if (!await ask(`Forget “${text}”?`, 'Future recordings will no longer get this fix.', [{ label: 'Forget', value: true, kind: 'primary danger' }, { label: 'Keep', value: false }])) return;
     try { const response = await postJson('/api/dictionary/forget', forget); if (!signedOut(response)) loadDictionary(); } catch { /* retry by clicking again */ }
   };
-  row.append(label, remove);
+  if (rule) { const actions = document.createElement('div'); actions.className = 'dict-actions'; actions.append(modeButton(rule), remove); row.append(label, actions); }
+  else row.append(label, remove);
   return row;
 }
 
