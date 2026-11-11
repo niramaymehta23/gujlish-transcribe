@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.helpers import DeferredExecutor
+from transcriber.speech import align
 from web.server import create_app
 
 
@@ -52,7 +53,9 @@ class TestEdits(unittest.TestCase):
 
     def test_status_carries_segments_and_aligned_gujlish(self):
         status = self.status()
-        self.assertEqual(status["segments"][1], {"start": 4, "end": 6, "text": "હા નીરમય", "fixes": []})
+        self.assertEqual(
+            status["segments"][1], {"start": 4, "end": 6, "text": "હા નીરમય", "fixes": [], "suggestions": []}
+        )
         self.assertEqual(status["gujlish_tokens"], [["nirmay", "aavyo,", "nirmay!"], ["ha", "nirmay"]])
         self.assertEqual(status["gujlish"]["status"], "complete")
 
@@ -127,6 +130,46 @@ class TestEdits(unittest.TestCase):
         self.assertEqual(self.client.post(forget, json={"gujlish": "નિરામય"}).status_code, 404)
         self.assertEqual(self.client.get("/api/dictionary").json, {"corrections": [], "gujlish": {}})
 
+    def test_a_fix_asks_in_future_unless_always_and_the_list_can_switch_it(self):
+        self.edit()
+        entry = self.client.get("/api/dictionary").json["corrections"][0]
+        self.assertEqual((entry["mode"], entry["rejected"]), ("ask", 0))
+        mode = "/api/dictionary/mode"
+        self.assertEqual(self.client.post(mode, json={"correction": entry["id"], "mode": "always"}).status_code, 200)
+        self.assertEqual(self.client.get("/api/dictionary").json["corrections"][0]["mode"], "always")
+        self.assertEqual(self.client.post(mode, json={"correction": entry["id"], "mode": "x"}).status_code, 404)
+        self.assertEqual(self.client.post(mode, json={"correction": "nope", "mode": "ask"}).status_code, 404)
+        self.edit(start=2, end=3, heard="નીરમય!", always=True)
+        self.client.post(mode, json={"correction": entry["id"], "mode": "ask"})
+        self.edit(segment=1, start=1, end=2, heard="નીરમય", always=False)
+        self.assertEqual(self.client.get("/api/dictionary").json["corrections"][0]["mode"], "ask")
+
+    def test_rejecting_a_suggestion_keeps_the_words_and_records_where(self):
+        self.edit(start=2, end=3, heard="નીરમય!", remember=True)
+        rule = json.loads(self.dictionary.read_text(encoding="utf-8"))["corrections"][0]["id"]
+        data = json.loads(self.json.read_text(encoding="utf-8"))
+        data["segments"][1]["suggestions"] = [
+            {"start": 1, "end": 2, "correct": "નિરામય", "correct_gujlish": "", "rule": rule}
+        ]
+        self.json.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(self.status()["segments"][1]["suggestions"][0]["rule"], rule)
+        dismiss = f"/api/jobs/{self.job_id}/dismiss"
+        self.assertEqual(
+            self.client.post(dismiss, json={"segment": 1, "start": 0, "end": 1, "rule": rule}).status_code, 409
+        )
+        self.assertEqual(self.client.post(dismiss, json={"segment": 1}).status_code, 400)
+        self.assertEqual(
+            self.client.post(dismiss, json={"segment": 1, "start": 1, "end": 2, "rule": rule}).json, {"dismissed": True}
+        )
+        segment = self.status()["segments"][1]
+        self.assertEqual((segment["text"], segment["suggestions"]), ("હા નીરમય", []))
+        saved = json.loads(self.dictionary.read_text(encoding="utf-8"))["corrections"][0]
+        self.assertEqual(saved["rejected"][0]["context"], "હા નીરમય")
+        self.assertEqual(self.client.get("/api/dictionary").json["corrections"][0]["rejected"], 1)
+        self.assertEqual(
+            self.client.post(dismiss, json={"segment": 1, "start": 1, "end": 2, "rule": rule}).status_code, 409
+        )
+
     def test_suggestions_use_your_words(self):
         self.edit(correct_gujlish="niramay")
         response = self.client.get("/api/transliterate", query_string={"to": "gu", "text": "Niramay"})
@@ -169,6 +212,59 @@ class TestEdits(unittest.TestCase):
             self.assertEqual(response.get_data(as_text=True), "nirmay aavyo, nirmay! ha nirmay\n")
         self.assertEqual(self.client.get(f"/api/jobs/{self.job_id}/download/gujlish-docx").status_code, 200)
         self.assertEqual(self.client.get(f"/api/jobs/{self.job_id}/download/gujlish-srt").status_code, 404)
+
+    def word_audio(self, **args):
+        query = "&".join(f"{key}={value}" for key, value in {"segment": 0, "start": 1, "end": 2, **args}.items())
+        return self.client.get(f"/api/jobs/{self.job_id}/word-audio?{query}")
+
+    def test_word_audio_plays_the_aligned_words(self):
+        recording = Path(self.temp.name) / "recordings" / "talk.wav"
+        recording.parent.mkdir()
+        recording.write_bytes(b"audio")
+        times = [{"start": 0.5, "end": 1.0}, {"start": 1.4, "end": 2.2}, {"start": 2.5, "end": 3.6}]
+        aligner = patch("web.server.align.Aligner")
+        model = aligner.start()
+        self.addCleanup(aligner.stop)
+        model.return_value.align.return_value = times
+        cut = patch("web.server.clip_audio", return_value=b"RIFF")
+        clip_audio = cut.start()
+        self.addCleanup(cut.stop)
+        with patch("web.server.align.read_audio", return_value=b""):
+            response = self.word_audio()
+            again = self.word_audio(start=0, end=3)
+        self.assertEqual((response.status_code, response.mimetype), (200, "audio/wav"))
+        self.assertEqual(response.headers["X-Word-Timing"], "aligned")
+        self.assertEqual(response.data, b"RIFF")
+        self.assertEqual(again.headers["X-Word-Timing"], "aligned")
+        self.assertEqual(clip_audio.call_args_list[0].args, (recording, 1.0, 2.6))  # 0.4 s around the word
+        self.assertEqual(clip_audio.call_args_list[1].args, (recording, 0.1, 4.0))
+        self.assertEqual((model.call_count, model.return_value.align.call_count), (1, 1))  # loaded and aligned once
+
+    def test_word_audio_estimates_when_the_model_is_missing(self):
+        recording = Path(self.temp.name) / "recordings" / "talk.wav"
+        recording.parent.mkdir()
+        recording.write_bytes(b"audio")
+        with (
+            patch("web.server.align.Aligner", side_effect=OSError("offline")),
+            patch("web.server.clip_audio", return_value=b"RIFF") as clip_audio,
+        ):
+            response = self.word_audio(start=0, end=1)
+        self.assertEqual(response.headers["X-Word-Timing"], "estimated")
+        rough = align.estimate_times("નીરમય આવ્યો, નીરમય!", 0, 4)
+        self.assertEqual(clip_audio.call_args.args, (recording, 0.0, rough[0]["end"] + 1.0))  # a second around
+
+    def test_word_audio_needs_the_recording_and_current_words(self):
+        self.assertEqual(self.word_audio().status_code, 404)  # the recording is not on disk
+        recording = Path(self.temp.name) / "recordings" / "talk.wav"
+        recording.parent.mkdir()
+        recording.write_bytes(b"audio")
+        self.assertEqual(self.word_audio(start=2, end=4).status_code, 409)
+        self.assertEqual(self.word_audio(segment=5).status_code, 409)
+        self.assertEqual(self.word_audio(start="x").status_code, 400)
+
+    def test_estimate_times_shares_the_line_by_length(self):
+        self.assertEqual(align.estimate_times("ab cd", 0, 5), [{"start": 0, "end": 2}, {"start": 3, "end": 5}])
+        self.assertEqual(align.estimate_times("", 0, 5), [])
 
 
 if __name__ == "__main__":

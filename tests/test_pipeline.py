@@ -133,7 +133,15 @@ class TestWorkflow(unittest.TestCase):
     def test_dictionary_fixes_words_after_merging(self):
         dictionary = self.root / "dictionary.json"
         dictionary.write_text(
-            json.dumps({"corrections": [{"id": "a", "heard": "નીરમય", "correct": "નિરામય"}]}), encoding="utf-8"
+            json.dumps(
+                {
+                    "corrections": [
+                        {"id": "a", "heard": "નીરમય", "correct": "નિરામય", "mode": "always"},
+                        {"id": "b", "heard": "આવ્યો", "correct": "આવી"},  # no mode: only suggested
+                    ]
+                }
+            ),
+            encoding="utf-8",
         )
         output = self.root / "transcripts" / "run"
         argv = [str(self.source), "flex", "--chunking", "fixed", "--output-dir", str(output)]
@@ -151,6 +159,9 @@ class TestWorkflow(unittest.TestCase):
         self.assertEqual(txt.read_text(encoding="utf-8").strip(), "હું નિરામય આવ્યો નિરામય")
         segments = json.loads(data.read_text(encoding="utf-8"))["segments"]
         self.assertEqual(segments[0]["fixes"], [{"start": 1, "end": 2, "heard": "નીરમય", "rule": "a"}])
+        self.assertEqual(
+            segments[1]["suggestions"], [{"start": 0, "end": 1, "correct": "આવી", "correct_gujlish": "", "rule": "b"}]
+        )
         self.assertIn("નિરામય", txt.with_suffix(".srt").read_text(encoding="utf-8"))
 
     def test_reset_discards_the_old_matching_checkpoint(self):

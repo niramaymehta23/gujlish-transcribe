@@ -96,6 +96,18 @@ def fill_missing(times: list[dict | None], words: list[str], start: float, end: 
     return out
 
 
+def estimate_times(text: str, start: float, end: float) -> list[dict]:
+    """Rough word times for a chunk that could not be aligned: its time shared out by each word's length."""
+    words = text.split()
+    total, used, out = max(1, len(" ".join(words))), 0, []
+    for word in words:
+        a = start + (end - start) * used / total
+        used += len(word)
+        out.append({"start": round(a, 3), "end": round(start + (end - start) * used / total, 3)})
+        used += 1  # the space
+    return out
+
+
 def word_times(
     words: list[str], log_probs: np.ndarray, vocab: dict[str, int], blank: int, start: float, end: float
 ) -> list[dict] | None:
