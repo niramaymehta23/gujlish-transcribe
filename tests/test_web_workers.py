@@ -115,7 +115,7 @@ class TestWorkers(unittest.TestCase):
         lines = [event(stage="translating", done=1, total=4), event(stage="translating", done=0, total=0)]
         command = self.run_task(FakeWorker(lines, on_wait=finish))
         self.assertTrue(command[1].endswith("translate.py"))
-        self.assertEqual(command[2:], [str(self.json), "--progress-json"])
+        self.assertEqual(command[2:], [str(self.json), "--progress-json", "--no-captions"])
         self.assertEqual(seen[0], {"status": "running", "progress": 25, "message": "Translating · 1 of 4"})
         self.assertEqual(self.job["translation"], {"status": "complete", "progress": 100, "message": "Ready"})
 

@@ -11,6 +11,7 @@ from docx import Document
 
 from scripts.evaluate import error_rate, normalize
 from tests.helpers import DeferredExecutor
+from transcriber.english.captions import english_key
 from web.server import create_app, markdown_docx
 
 
@@ -147,6 +148,38 @@ class TestStages(unittest.TestCase):
         with self.client.get(f"/api/jobs/{self.job_id}/download/en-srt") as response:
             self.assertEqual(response.status_code, 200)
             self.assertIn("Today, a talk", response.get_data(as_text=True))
+
+    def test_the_english_srt_uses_the_timed_captions_while_they_match_the_translation(self):
+        english = {
+            "kind": "translation",
+            "segments": [{"start": 0, "end": 5, "source": "આજે વાત", "text": "Today, a talk"}],
+        }
+        (self.run_dir / "talk.flex.en.json").write_text(json.dumps(english, ensure_ascii=False), encoding="utf-8")
+        (self.run_dir / "talk.flex.en.txt").write_text("Today, a talk", encoding="utf-8")
+        self.assertTrue(self.client.get(f"/api/jobs/{self.job_id}").json["captions_stale"])
+        captions = {
+            "kind": "captions",
+            "english": english_key(english),
+            "captions": [{"start": 1.25, "end": 2.5, "text": "Today, a talk"}],
+        }
+        (self.run_dir / "talk.flex.en.captions.json").write_text(json.dumps(captions), encoding="utf-8")
+        self.assertFalse(self.client.get(f"/api/jobs/{self.job_id}").json["captions_stale"])
+        with self.client.get(f"/api/jobs/{self.job_id}/download/en-srt") as response:
+            self.assertEqual(response.get_data(as_text=True), "1\n00:00:01,250 --> 00:00:02,500\nToday, a talk\n")
+        english["segments"][0]["text"] = "Today, one talk"
+        (self.run_dir / "talk.flex.en.json").write_text(json.dumps(english, ensure_ascii=False), encoding="utf-8")
+        with self.client.get(f"/api/jobs/{self.job_id}/download/en-srt") as response:
+            self.assertIn("00:00:00,000 --> 00:00:05,000\nToday, one talk", response.get_data(as_text=True))
+
+    def test_captions_alone_need_a_translation_and_get_the_recording(self):
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "g"}):
+            self.assertEqual(self.post("captions").status_code, 409)
+            (self.run_dir / "talk.flex.en.txt").write_text("Today, a talk", encoding="utf-8")
+            self.assertEqual(self.post("captions").status_code, 202)
+        (key, command), *rest = self.executor.tasks[-1][1][1]
+        self.assertEqual((key, rest), ("captions", []))
+        self.assertTrue(command[1].endswith("captions.py"))
+        self.assertEqual(command[-2], "--audio")
 
     def test_markdown_docx_structure(self):
         document = Document(

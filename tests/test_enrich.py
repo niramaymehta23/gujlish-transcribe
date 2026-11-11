@@ -316,7 +316,9 @@ class TestRunTranslation(Base):
         (self.run_dir / "channel.md").write_text("Spell it Harisena.", encoding="utf-8")
         llm = FakeLLM()
         llm.describe = lambda: "fake"
-        args = argparse.Namespace(llm_model=None, tone="spoken", glossary=None, style_note="", label=None, channel=None)
+        args = argparse.Namespace(
+            llm_model=None, tone="spoken", glossary=None, style_note="", label=None, channel=None, no_captions=True
+        )
         with (
             patch("transcriber.english.publish_common.DATA", self.run_dir),
             patch("transcriber.english.enrich.GeminiLLM", lambda model: llm),

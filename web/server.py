@@ -28,6 +28,7 @@ from uuid import uuid4
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import transcriber.files.storage as storage
+from transcriber.english.captions import captions_current, captions_srt
 from transcriber.english.llm import gemini_available
 from transcriber.files.storage import ROOT, new_run, run_paths, stage_paths
 from transcriber.files.subtitles import to_srt
@@ -70,9 +71,10 @@ class Stage:
 STAGES = {
     "gujlish": Stage("scripts/transliterate.py", "gujlish_json", "Writing Gujlish"),
     "translation": Stage("scripts/translate.py", "translation_txt", "Translating"),
+    "captions": Stage("scripts/captions.py", "captions_json", "Timing the English captions"),
     "summary": Stage("scripts/summarize.py", "summary_md", "Writing the summary & YouTube details"),
 }
-PROGRESS_EVENTS = {"transliterating", "translating", "summarizing"}
+PROGRESS_EVENTS = {"transliterating", "translating", "aligning", "captioning", "summarizing"}
 
 
 def stage_output(transcript_json: str, key: str) -> Path:
@@ -460,10 +462,14 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
         queue_stages(job_id, ("gujlish",))
         change(status="complete", progress=100, message="Transcript ready")
 
-    def stage_command(transcript_json, key, engine="auto"):
+    def stage_command(transcript_json, key, engine="auto", recording=None):
         command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
         if key == "gujlish":
             command += ["--dictionary", str(dictionary_path()), "--engine", engine]
+        if key == "translation":
+            command.append("--no-captions")  # the captions run as their own step, with their own progress
+        if key == "captions" and recording:
+            command += ["--audio", recording]  # to time the captions to the speech
         return command
 
     def set_stage(job, key, **fields):
@@ -477,7 +483,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             for key in keys:
                 tasks[(job_id, key)] = token
                 job[key] = {"status": "queued", "progress": None, "message": "Waiting to start…"}
-            steps = [(key, stage_command(job["json"], key, engine)) for key in keys]
+            steps = [(key, stage_command(job["json"], key, engine, job.get("source"))) for key in keys]
 
         def change(meta):
             meta["pending"] = sorted({*meta.get("pending", []), *keys})
@@ -861,6 +867,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
                 current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
                 view["english_stale"] = [s.get("source") for s in english] != current
+            # A translation made before the caption step, or whose captions were not redone after it changed.
+            view["captions_stale"] = state["captions"]["status"] != "running" and not captions_current(transcript_json)
         if state["summary"]["status"] == "complete":
             view["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
             made = paths["translation_json"]
@@ -895,8 +903,8 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
             job = find_job(job_id)
             if job.get("status") != "complete" or not job.get("json"):
                 return jsonify(error="Finish the transcript first."), 409
-            if keys == ("summary",) and stage_view(job, "translation")["status"] != "complete":
-                return jsonify(error="Translate the transcript before summarizing it."), 409
+            if keys in {("summary",), ("captions",)} and stage_view(job, "translation")["status"] != "complete":
+                return jsonify(error="Translate the transcript first."), 409
             if busy(job, *keys):
                 return jsonify(error="This step is already running."), 409
         queue_stages(job_id, keys, engine)
@@ -904,7 +912,12 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
 
     @app.post("/api/jobs/<job_id>/translate")
     def translate_job(job_id):
-        return start_stage(job_id, "translation")
+        return start_stage(job_id, "translation", "captions")
+
+    @app.post("/api/jobs/<job_id>/captions")
+    def captions_job(job_id):
+        """Re-break and re-time the English subtitles, e.g. for a translation made before this step existed."""
+        return start_stage(job_id, "captions")
 
     @app.post("/api/jobs/<job_id>/summarize")
     def summarize_job(job_id):
@@ -913,7 +926,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     @app.post("/api/jobs/<job_id>/english")
     def english_job(job_id):
         """Translate, then write the summary and YouTube details: the step you take once the words are right."""
-        return start_stage(job_id, "translation", "summary")
+        return start_stage(job_id, "translation", "captions", "summary")
 
     @app.post("/api/jobs/<job_id>/gujlish")
     def gujlish_job(job_id):
@@ -925,7 +938,7 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
     @app.post("/api/jobs/<job_id>/stop")
     def stop_stage(job_id):
         """Stop the Gujlish, or the English and summary. Finished parts are kept, so starting again continues."""
-        keys = {"gujlish": ("gujlish",), "english": ("translation", "summary")}.get(
+        keys = {"gujlish": ("gujlish",), "english": ("translation", "captions", "summary")}.get(
             (request.get_json(silent=True) or {}).get("stage")
         )
         if not keys:
@@ -1132,14 +1145,19 @@ def create_app(*, executor=None, settings: Settings | None = None) -> Flask:
                 mimetype=docx_type,
             )
         if kind in {"srt", "en-srt"} and job.get("json"):
-            # Built from the timed segments, so runs saved before SRT files existed can still be exported.
+            # Built from the timed segments, so runs saved before SRT files existed can still be exported. The English
+            # uses the caption step's breaks and times while they match the current translation.
             source = Path(job["json"]) if kind == "srt" else stage_paths(Path(job["json"]))["translation_json"]
             if not source.exists():
                 abort(404)
-            segments = json.loads(source.read_text(encoding="utf-8")).get("segments", [])
             name = source.with_suffix(".srt").name
+            if kind == "en-srt" and captions_current(Path(job["json"])):
+                captions = stage_paths(Path(job["json"]))["captions_json"].read_text(encoding="utf-8")
+                text = captions_srt(json.loads(captions).get("captions", []))
+            else:
+                text = to_srt(json.loads(source.read_text(encoding="utf-8")).get("segments", []))
             return send_file(
-                BytesIO(to_srt(segments).encode("utf-8")),
+                BytesIO(text.encode("utf-8")),
                 as_attachment=True,
                 download_name=name,
                 mimetype="application/x-subrip; charset=utf-8",

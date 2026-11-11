@@ -33,6 +33,14 @@ Behavior that matters:
 - The recognizer ends every chunk with a full stop. Those stops are dropped after recognition ("?" and "!" stay), so they no longer show up in the Gujarati, the Gujlish or the subtitles, and the English decides sentence ends from meaning.
 - Replies are cleaned (reasoning tags, fences, labels, wrapping quotes) and validated per chunk (missing, empty, still mostly Gujarati, far shorter than the source). One retry of the passage, then each chunk still unusable is sent alone, then its source is kept with an `[untranslated]` marker. Nothing is silently dropped.
 - Subtitle cues end at sentence ends, then commas and dashes, then (for Gujarati and Gujlish, which have little punctuation) common clause-final verbs such as છે and નથી, before falling back to the line length.
+
+## English captions: breaks and times
+
+The translation gives each chunk its share of the English, and a cue never crosses a chunk, so a phrase the audio cut in two was split across two captions. Flex gives no word times, so cue times were shared out over the whole chunk, pauses and applause included: a caption could appear ten seconds before it was said. The caption step (`transcriber/english/captions.py`) runs after translation and changes only where captions start and end:
+
+- **Word times by forced alignment** (`transcriber/speech/align.py`). The Gujlish wav2vec2 model scores every 20 ms frame of a chunk, and a Viterbi pass places each character of the known Gujarati text (its vocabulary covers Gujarati and Latin script). Nothing is re-recognized. On the first five minutes of a real talk, 84% of aligned word time fell inside speech found by Silero VAD, and only 1 of 55 long pauses fell inside a word (a last word soaking up a 5 s pause, which is now capped at 0.25 s per character plus 0.3 s). It runs on the CPU at about half a second per chunk. Not yet measured against hand-marked word times.
+- **Breaks by Gemini, checked by code.** About 150 English words at a time (to the next sentence end), with the three captions before, the next 30 words and the numbered Gujarati words of those chunks. The reply must repeat the English word for word; otherwise it is retried once, then that stretch keeps the plain rules (which may now cross chunks). For each caption the model names the Gujarati word where it starts; that word's time is used when it is timed, moves forward, sits in or next to the caption's chunks and is not after the caption's own words. Otherwise the caption starts at the Gujarati word boundary nearest to where its English sits in the chunk.
+- **On screen** from its start until its last word plus 0.4 s, at least 1 s when there is room, never overlapping the next. Each English word gets an estimated time inside its caption, for the clip studio.
 - Transcript text is escaped so it cannot close the prompt's tags.
 
 ## Summary
