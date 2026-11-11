@@ -44,6 +44,7 @@ INSTAGRAM_LIMIT = 2200
 # Scene types: text fields with their length limits, and list fields with (fewest, most, limit per item).
 SCENES = {
     "hook": {"required": {"headline": 70}, "optional": {"kicker": 30}},
+    "punch": {"required": {"text": 32}, "optional": {"sub": 50}},
     "quote": {"required": {"text": 130}, "optional": {}},
     "compare": {"required": {"title": 50}, "optional": {}, "rows": (2, 5, 26)},
     "list": {"required": {"title": 50}, "optional": {}, "items": (2, 5, 52)},
@@ -51,9 +52,71 @@ SCENES = {
     "story": {"required": {}, "optional": {"place": 40}, "lines": (1, 5, 72)},
     "speaker": {"required": {}, "optional": {"label": 40}},
     "end": {"required": {"text": 60}, "optional": {"sub": 60}},
+    "picture": {"required": {}, "optional": {"kicker": 30, "title": 50, "stamp": 18}, "chips": (1, 6, 26)},
 }
+SETTINGS = ("city", "palace", "water", "hills", "arch", "sky")  # drawn in remotion/src/picture.tsx
+EFFECTS = ("rays", "fall")
 MIN_SCENE_SECONDS = 2.0
-LONG_GRAPHIC_SECONDS = 25.0  # past this a graphic goes stale; a warning, since a compare can earn the time
+# Pacing, as warnings: a graphic alone on screen goes stale fast, one beside the speaker lasts a little longer, the hook
+# must land at once, and a long stretch of the speaker alone wants a graphic to lift it.
+HOLD_SECONDS = {"full": 8.0, "split": 15.0, "hook": 4.5, "speaker": 15.0, "picture": 12.0}
+STYLES = ("paper", "engraving", "editorial")  # the art directions in remotion/src/looks.ts, all light
+LAYOUTS = ("full", "split")
+ICON_INDEX = REMOTION / "node_modules" / "@phosphor-icons" / "react" / "dist" / "index.d.ts"
+# Generated illustrations (Gemini). The key comes from GEMINI_API_KEY, or the macOS Keychain item below; never a file.
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
+KEYCHAIN_ITEM = "harisena-gemini"
+PICTURE_DESCRIPTION = (12, 300)
+# Words that would put a person in a generated picture. The only images of people are from the talk's own video.
+PEOPLE_WORDS = (
+    "man",
+    "men",
+    "woman",
+    "women",
+    "person",
+    "people",
+    "boy",
+    "girl",
+    "child",
+    "children",
+    "king",
+    "queen",
+    "saint",
+    "sadhu",
+    "swami",
+    "swamiji",
+    "guru",
+    "guruhari",
+    "god",
+    "krishna",
+    "arjuna",
+    "arjun",
+    "akbar",
+    "birbal",
+    "bhagwan",
+    "maharaj",
+    "devotee",
+    "face",
+    "faces",
+    "hand",
+    "hands",
+    "figure",
+    "portrait",
+    "student",
+    "students",
+    "crowd",
+    "farmer",
+    "merchant",
+)
+PICTURE_STYLES = {
+    "paper": "a handmade cut-paper craft illustration: layered coloured card with visible paper grain and soft shadows "
+    "between the layers, warm colours (terracotta, mustard, sage, cream)",
+    "editorial": "a flat, bold, modern editorial vector illustration: clean geometric shapes, a few flat colours "
+    "(warm orange, sunny yellow, cream, deep green), minimal shading",
+    "engraving": "a classic engraved print illustration: fine cross-hatching and line work in dark sepia ink with a "
+    "few washes of muted gold and red, like an old book plate",
+}
+LOOK_GROUNDS = {"paper": "#ece3d1", "engraving": "#efe7d6", "editorial": "#f4ecdc"}
 
 
 class StudioError(Exception):
@@ -106,6 +169,64 @@ def timed_words(cues: list[dict]) -> list[dict]:
     return words
 
 
+def speech_words(cues: list[dict], pauses: list[tuple[float, float]]) -> list[dict]:
+    """Each word with a time that follows the real speech: a cue's words are shared out over the stretches where he is
+    actually speaking (the cue minus the pauses inside it), not evenly over the whole cue. So a caption starts when he
+    starts talking, and a cue split across a pause splits there."""
+    words = []
+    for cue in cues:
+        parts = cue["text"].split()
+        if not parts:
+            continue
+        runs, at = [], cue["start"]
+        for low, high in sorted(pauses):
+            if high <= at or low >= cue["end"]:
+                continue
+            if low - at >= 0.15:
+                runs.append((at, low))
+            at = max(at, high)
+        if cue["end"] - at >= 0.15:
+            runs.append((at, cue["end"]))
+        if not runs:
+            runs = [(cue["start"], cue["end"])]
+        speech = sum(high - low for low, high in runs)
+
+        def place(share: float, starting: bool) -> float:
+            """The moment `share` of the cue's speech has been said. A word starting exactly at a pause starts
+            when he speaks again; one ending there ends as he stops."""
+            left = share * speech
+            for low, high in runs:
+                if left < high - low - 1e-9 or (not starting and left <= high - low + 1e-9):
+                    return low + left
+                left -= high - low
+            return runs[-1][1]
+
+        total = sum(len(part) for part in parts)
+        span = max(0.0, cue["end"] - cue["start"])
+        used = 0
+        for part in parts:
+            start = place(used / total, True)
+            # where timed_words puts the word's middle: the sentence lines a clip is chosen by are cut on those
+            # times, so a clip takes exactly the words of its lines, whatever their speech timing
+            mid = cue["start"] + span * (used + len(part) / 2) / total
+            used += len(part)
+            # a word ends where its own run ends, never across a pause
+            end = place(used / total, False)
+            run_end = next((high for low, high in runs if low - 1e-9 <= start < high), end)
+            words.append({"start": start, "end": min(end, run_end), "text": part, "mid": mid})
+    return words
+
+
+def speech_pauses(media: Path) -> list[tuple[float, float]]:
+    """The pauses in the whole recording, at the quietest threshold that finds a natural share of them."""
+    length = media_duration(media)
+    for threshold in SNAP_THRESHOLDS_DB:
+        pauses = silences(media, 0.0, length, threshold)
+        if sum(high - low for low, high in pauses) >= 0.08 * length:
+            return pauses
+    return pauses
+
+
 def ends_sentence(word: str) -> bool:
     return word.rstrip(QUOTES)[-1:] in SENTENCE_END
 
@@ -138,28 +259,70 @@ def sentence_lines(words: list[dict]) -> list[dict]:
     return lines
 
 
+# Small words that lean on the word after them; a caption page never ends on one.
+HANGING_WORDS = frozenset(
+    "a an the of to in on at by for from with and but or nor so as than that this these those is are was were be "
+    "been has have had my your his her its our their just very not no".split()
+)
+
+
+def piece_words(words: list[dict], start: float, end: float, span: tuple[float, float] | None = None) -> list[dict]:
+    """The words of one piece of a clip: those of its own sentence lines (`span`) that are spoken inside the piece, so
+    nothing cut away (past the clip's end, or across a trimmed pause) is shown."""
+    low, high = span or (start, end)
+    return [
+        word
+        for word in words
+        if low - 0.01 <= word.get("mid", (word["start"] + word["end"]) / 2) <= high + 0.01
+        and start - 0.3 <= (word["start"] + word["end"]) / 2 <= end + 0.3
+    ]
+
+
+def clip_words(words: list[dict], clip: dict) -> list[dict]:
+    """Every word of a clip with when he says it, in clip time: what graphics are timed to."""
+    timed, offset = [], 0.0
+    for segment in segments_of(clip):
+        span = (segment["line_start"], segment["line_end"])
+        for word in piece_words(words, segment["start"], segment["end"], span):
+            at = max(0.0, word["start"] - segment["start"]) + offset
+            timed.append({"text": word["text"], "at": round(at, 3)})
+        offset += segment["end"] - segment["start"]
+    return timed
+
+
 def caption_pages(
     words: list[dict], start: float, end: float, max_chars: int, span: tuple[float, float] | None = None
 ) -> list[dict]:
     """Caption pages for one clip, in clip time. A page ends at a sentence, or when full, and stays up across a short
     pause so captions don't flicker. `span` is where the clip's own sentences run: a cut moved onto a pause can reach
     past them, and the neighbouring words must not show up in its captions."""
-    low, high = span or (start, end)
-    inside = [word for word in words if low - 0.01 <= (word["start"] + word["end"]) / 2 <= high + 0.01]
+    inside = piece_words(words, start, end, span)
     pages: list[list[dict]] = [[]]
     for word in inside:
         page = pages[-1]
         size = sum(len(w["text"]) + 1 for w in page)
         if page and size + len(word["text"]) > max_chars:
-            cut = next(
-                (
-                    at
-                    for at in range(len(page) - 1, 0, -1)
-                    if page[at - 1]["text"].rstrip(QUOTES)[-1:] in ",;:—–"
-                    and sum(len(w["text"]) + 1 for w in page[:at]) >= max_chars // 2
-                ),
-                len(page),
-            )
+            # break where he pauses if there is such a place in the page's second half, else after a comma or dash
+            def good(at: int, test) -> bool:
+                return test(at) and sum(len(w["text"]) + 1 for w in page[:at]) >= max_chars // 2
+
+            def pause(at: int) -> bool:
+                return page[at]["start"] - page[at - 1]["end"] >= 0.2
+
+            def comma(at: int) -> bool:
+                return page[at - 1]["text"].rstrip(QUOTES)[-1:] in ",;:—–"
+
+            def loose(at: int) -> bool:
+                """A page may not end on a word that leans on the next one ("just an | hour")."""
+                return page[at - 1]["text"].lower().strip("\"'“”‘’") in HANGING_WORDS
+
+            cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, comma)), None)
+            if cut is None:
+                cut = next((at for at in range(len(page) - 1, 0, -1) if good(at, pause) and not loose(at)), None)
+            if cut is None:
+                cut = len(page)
+                while cut > 1 and loose(cut) and sum(len(w["text"]) + 1 for w in page[: cut - 1]) >= max_chars // 3:
+                    cut -= 1
             pages[-1], page = page[:cut], page[cut:]
             pages.append(page)
         page.append(word)
@@ -219,12 +382,126 @@ def check_candidate(item: object, lines: list[dict]) -> dict:
     if not (isinstance(first, int) and isinstance(last, int) and 1 <= first <= last <= len(lines)):
         clip["problem"] = f"not a real line range ({first!r} to {last!r})"
         return clip
+    kept, problem = kept_ranges(first, last, item.get("skip"))
+    if problem:
+        clip["problem"] = problem
+        return clip
     clip.update(first_line=first, last_line=last, start=lines[first - 1]["start"], end=lines[last - 1]["end"])
     clip.update(line_start=clip["start"], line_end=clip["end"])
-    clip["text"] = " ".join(line["text"] for line in lines[first - 1 : last])
-    clip["duration"] = round(clip["end"] - clip["start"], 3)
+    clip["segments"] = [
+        {"start": lines[a - 1]["start"], "end": lines[b - 1]["end"], "first_line": a, "last_line": b} for a, b in kept
+    ]
+    for segment in clip["segments"]:
+        segment.update(line_start=segment["start"], line_end=segment["end"])
+    clip["skipped"] = [[a, b] for a, b in skipped_ranges(kept)]
+    clip["text"] = " … ".join(" ".join(line["text"] for line in lines[a - 1 : b]) for a, b in kept)
+    clip["duration"] = segments_length(clip["segments"])
     clip["problem"] = limit_problem(clip)
     return clip
+
+
+def kept_ranges(first: int, last: int, skip: object) -> tuple[list[tuple[int, int]], str | None]:
+    """The line ranges a clip keeps once its `skip` ranges (lines to leave out from inside it) are taken away."""
+    if skip in (None, []):
+        return [(first, last)], None
+    if not isinstance(skip, list) or not all(
+        isinstance(pair, list) and len(pair) == 2 and all(isinstance(n, int) for n in pair) for pair in skip
+    ):
+        return [], "skip must be a list of [first_line, last_line] pairs"
+    kept, at = [], first
+    for low, high in sorted(skip):
+        if not first < low <= high < last:
+            return [], f"skip {low}-{high} must be inside the clip, leaving its first and last lines"
+        if low < at:
+            return [], f"skip {low}-{high} overlaps another skip"
+        kept.append((at, low - 1))
+        at = high + 1
+    kept.append((at, last))
+    return kept, None
+
+
+def skipped_ranges(kept: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    return [(a[1] + 1, b[0] - 1) for a, b in zip(kept, kept[1:])]
+
+
+def segments_length(segments: list[dict]) -> float:
+    return round(sum(segment["end"] - segment["start"] for segment in segments), 3)
+
+
+def segments_of(clip: dict) -> list[dict]:
+    """A clip's pieces of the recording. Clips listed before skips existed are one piece."""
+    return clip.get("segments") or [
+        {"start": clip["start"], "end": clip["end"], "line_start": clip["line_start"], "line_end": clip["line_end"]}
+    ]
+
+
+EMPHASIS_SMALL_WORDS = frozenset(
+    "a an the of to in on at by for from with and but or so as is are was were be it this that he she we you they i "
+    "his her our your their my me him them us what how".split()
+)
+
+
+def repeated_phrases(pages: list[dict]) -> list[dict]:
+    """Phrases he says more than once in a clip, with each time he says them: repetition is how he marks a big point,
+    and the storyboard should make it a big moment on screen. Longest first; shorter phrases inside a reported one
+    are left out."""
+    words = []
+    for index, page in enumerate(pages):
+        for word in page["text"].split():
+            clean = re.sub(r"[^\w'-]", "", word.lower())
+            if clean:
+                words.append((clean, index, page["from"]))
+    found: dict[str, list[float]] = {}
+    for size in range(6, 1, -1):
+        for at in range(len(words) - size + 1):
+            gram = words[at : at + size]
+            if len({page for _, page, _ in gram}) > 1:
+                continue  # a phrase across two pages isn't one phrase
+            if sum(word not in EMPHASIS_SMALL_WORDS for word, _, _ in gram) < 2:
+                continue
+            times = found.setdefault(" ".join(word for word, _, _ in gram), [])
+            if gram[0][2] not in times:
+                times.append(gram[0][2])
+    kept: dict[str, list[float]] = {}
+    for text, times in sorted(found.items(), key=lambda item: -len(item[0].split())):
+        if len(times) > 1 and not any(text in longer and len(times) <= len(more) for longer, more in kept.items()):
+            kept[text] = times
+    repeated = [{"text": text, "times": times} for text, times in kept.items()]
+    return sorted(repeated, key=lambda item: (-len(item["text"].split()), item["times"][0]))
+
+
+def trim_long_pauses(segments: list[dict], pauses: list[tuple[float, float]]) -> list[dict]:
+    """The pieces of a clip with any long silence inside them cut out, such as a pause to drink water. Each side keeps
+    a short breath of the pause, so the speech doesn't run together."""
+    trimmed = []
+    for segment in segments:
+        at = segment["start"]
+        for low, high in sorted(pauses):
+            if high - low >= LONG_PAUSE_SECONDS and segment["start"] + 1 < low and high < segment["end"] - 1:
+                trimmed.append({**segment, "start": at, "end": round(low + PAUSE_KEPT_SECONDS, 3)})
+                at = round(high - PAUSE_KEPT_SECONDS, 3)
+        trimmed.append({**segment, "start": at})
+    return trimmed
+
+
+def clip_captions(words: list[dict], clip: dict, max_chars: int) -> list[dict]:
+    """Caption pages for a clip in clip time, each piece's captions following on from the last piece's."""
+    pages, offset = [], 0.0
+    for segment in segments_of(clip):
+        span = (segment["line_start"], segment["line_end"])
+        for page in caption_pages(words, segment["start"], segment["end"], max_chars, span):
+            pages.append({**page, "from": round(page["from"] + offset, 3), "to": round(page["to"] + offset, 3)})
+        offset += segment["end"] - segment["start"]
+    return pages
+
+
+def joins_of(clip: dict) -> list[float]:
+    """Clip times where one piece of the recording ends and the next begins."""
+    joins, at = [], 0.0
+    for segment in segments_of(clip)[:-1]:
+        at += segment["end"] - segment["start"]
+        joins.append(round(at, 3))
+    return joins
 
 
 def limit_problem(clip: dict) -> str | None:
@@ -310,11 +587,23 @@ def snap_cut(media: Path, at: float, *, starting: bool) -> tuple[float, bool]:
 
 
 def snap_clip(clip: dict, media: Path) -> None:
-    start, start_ok = snap_cut(media, clip["start"], starting=True)
-    end, end_ok = snap_cut(media, clip["end"], starting=False)
-    moved = {**clip, "start": start, "end": end, "duration": round(end - start, 3)}
-    if limit_problem(moved) is None and end > start:
-        clip.update(start=start, end=end, duration=moved["duration"], snapped=start_ok and end_ok)
+    """Move every cut of a clip, including the ones around skipped lines, onto a real pause."""
+    moved, all_ok = [], True
+    for segment in segments_of(clip):
+        start, start_ok = snap_cut(media, segment["start"], starting=True)
+        end, end_ok = snap_cut(media, segment["end"], starting=False)
+        moved.append({**segment, "start": start, "end": end})
+        all_ok = all_ok and start_ok and end_ok
+    ordered = all(a["end"] < b["start"] for a, b in zip(moved, moved[1:])) and all(m["end"] > m["start"] for m in moved)
+    trial = {**clip, "duration": segments_length(moved)}
+    if ordered and limit_problem(trial) is None:
+        clip.update(
+            segments=moved,
+            start=moved[0]["start"],
+            end=moved[-1]["end"],
+            duration=trial["duration"],
+            snapped=all_ok,
+        )
     else:
         clip["snapped"] = False
 
@@ -337,6 +626,10 @@ def render_clip_list(kept: list[dict], rejected: list[dict], title: str) -> str:
                 "",
                 f"**{fmt(clip['start'])} to {fmt(clip['end'])}** ({fmt(clip['duration'])}) · {clip['type']} · "
                 f"score {clip['score']}/10"
+                + "".join(
+                    f" · leaves out {fmt(a['end'])} to {fmt(b['start'])}"
+                    for a, b in zip(segments_of(clip), segments_of(clip)[1:])
+                )
                 + ("" if clip.get("snapped", True) else " · cut not on a clear pause, listen to the edges"),
                 "",
             ]
@@ -356,6 +649,46 @@ def render_clip_list(kept: list[dict], rejected: list[dict], title: str) -> str:
 # ---- Storyboards -------------------------------------------------------------------------------------------------
 
 
+def icon_names() -> set[str] | None:
+    """The Phosphor icon names Remotion can draw, in kebab-case, or None when Remotion isn't installed."""
+    if not ICON_INDEX.exists():
+        return None
+    names = re.findall(r"export \* from '\./csr/(\w+)'", ICON_INDEX.read_text(encoding="utf-8"))
+    return {re.sub(r"(?<!^)(?=[A-Z0-9])", "-", name).lower() for name in names}
+
+
+def _check_icons(scene: dict, name: str, known: set[str] | None, pictures: set[str] = frozenset()) -> list[str]:
+    if scene.get("icon") is not None:
+        return [
+            f"{name}: a scene no longer takes an icon (a lone badge read as a stray mark). Show the object as art with "
+            "one of the storyboard's pictures, or leave it out."
+        ]
+    wanted: list = []
+    art = scene.get("art")
+    if art is not None:
+        if not isinstance(art, list) or not 1 <= len(art) <= 3:
+            return [f"{name}: art must be a list of one to three picture or icon names."]
+        if scene.get("type") == "speaker":
+            return [f"{name}: a speaker scene takes no art."]
+    # art and hero may name one of the storyboard's generated pictures instead of an icon
+    wanted += [n for n in [scene.get("hero"), *(art or [])] if n not in pictures]
+    for field in ("rows", "items", "lines"):
+        for entry in scene.get(field) or []:
+            if isinstance(entry, dict):
+                wanted += [n for n in (entry.get("icon"), entry.get("left_icon")) if n not in pictures]
+    errors = []
+    for icon in wanted:
+        if icon is None:
+            continue
+        if not isinstance(icon, str) or not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", icon):
+            errors.append(f"{name}: icon {icon!r} must be a kebab-case Phosphor name, such as hands-praying.")
+        elif known is not None and icon not in known:
+            near = sorted(k for k in known if icon.split("-")[0] in k)[:6]
+            hint = f" Close ones: {', '.join(near)}." if near else ""
+            errors.append(f"{name}: there is no icon called {icon!r}.{hint}")
+    return errors
+
+
 def check_storyboard(board: object, clip: dict) -> tuple[list[str], list[str]]:
     """(errors, warnings) for a storyboard against its clip. A storyboard with errors can't be rendered."""
     errors: list[str] = []
@@ -363,6 +696,12 @@ def check_storyboard(board: object, clip: dict) -> tuple[list[str], list[str]]:
     scenes = board.get("scenes") if isinstance(board, dict) else None
     if not isinstance(scenes, list) or not scenes:
         return ["The storyboard has no scenes."], warnings
+    if board.get("style") not in STYLES:
+        errors.append(f"The storyboard needs a style: one of {', '.join(STYLES)}.")
+    known = icon_names()
+    pictures, picture_errors = _check_pictures(board.get("pictures"))
+    errors += picture_errors
+    used: set[str] = set()
     expected = 0.0
     previous = None
     for number, scene in enumerate(scenes, 1):
@@ -384,11 +723,31 @@ def check_storyboard(board: object, clip: dict) -> tuple[list[str], list[str]]:
             errors.append(f"{name} starts at {begin}, but the previous scene ended at {expected}. No gaps or overlaps.")
         if end - begin < MIN_SCENE_SECONDS:
             errors.append(f"{name} lasts {end - begin:.1f}s; the minimum is {MIN_SCENE_SECONDS:.0f}s.")
-        if kind != "speaker" and end - begin > LONG_GRAPHIC_SECONDS:
-            warnings.append(f"{name} stays up for {end - begin:.0f}s. Consider splitting it or cutting to the speaker.")
+        layout = scene.get("layout", "full")
+        if kind == "speaker":
+            if "layout" in scene:
+                errors.append(f"{name}: a speaker scene is always full screen, so it takes no layout.")
+        elif layout not in LAYOUTS:
+            errors.append(f"{name}: layout must be one of {', '.join(LAYOUTS)}.")
+        elif layout == "split" and not clip.get("has_video"):
+            errors.append(f"{name}: this talk has no video, so a split scene can't be shown.")
+        hold = HOLD_SECONDS.get("speaker" if kind == "speaker" else layout, HOLD_SECONDS["full"])
+        if number == 1 and kind == "hook":
+            hold = HOLD_SECONDS["hook"]
+        elif kind == "picture":
+            hold = HOLD_SECONDS["picture"]
+        if end - begin > hold:
+            advice = "Cut to a graphic or a split scene." if kind == "speaker" else "Split it, or cut to the speaker."
+            warnings.append(f"{name} stays up for {end - begin:.0f}s; keep it under {hold:g}s. {advice}")
         if kind == previous and kind != "speaker":
             warnings.append(f"{name} repeats the scene type before it.")
         expected, previous = end, kind
+        errors += _check_icons(scene, name, known, pictures)
+        named = [scene.get("hero"), *(scene.get("art") or [])]
+        for entry in scene.get("rows") or []:
+            if isinstance(entry, dict):
+                named += [entry.get("icon"), entry.get("left_icon")]
+        used.update(n for n in named if isinstance(n, str))
         for field, limit in spec["required"].items():
             value = scene.get(field)
             if not isinstance(value, str) or not value.strip():
@@ -399,9 +758,16 @@ def check_storyboard(board: object, clip: dict) -> tuple[list[str], list[str]]:
             value = scene.get(field)
             if value is not None and (not isinstance(value, str) or len(value) > limit):
                 errors.append(f"{name}: {field} must be text of at most {limit} characters.")
-        for field in ("rows", "items", "lines"):
-            if field in spec:
+        for field in ("rows", "items", "lines", "chips"):
+            if field in spec and (field != "chips" or "chips" in scene):
                 errors += _check_list(scene.get(field), field, spec[field], name, begin, end)
+        if kind == "picture":
+            if scene.get("setting") not in SETTINGS:
+                errors.append(f"{name} needs a setting: one of {', '.join(SETTINGS)}.")
+            if scene.get("effect") is not None and scene.get("effect") not in EFFECTS:
+                errors.append(f"{name}: effect must be one of {', '.join(EFFECTS)}.")
+            if not any(scene.get(field) for field in ("hero", "title", "chips", "stamp")):
+                errors.append(f"{name} needs something on it: a hero, a title, chips or a stamp.")
         if kind == "speaker":
             if not clip.get("has_video"):
                 errors.append(f"{name}: this talk has no video, so a speaker scene can't be shown.")
@@ -414,10 +780,54 @@ def check_storyboard(board: object, clip: dict) -> tuple[list[str], list[str]]:
             errors.append(f"{name}: every emphasis word must appear in its text.")
     if scenes and isinstance(scenes[-1], dict) and abs(expected - clip["duration"]) > 0.05:
         errors.append(f"The last scene ends at {expected}, but the clip is {clip['duration']} seconds long.")
-    if clip.get("has_video") and not any(isinstance(s, dict) and s.get("type") == "speaker" for s in scenes):
+    for join in clip.get("joins", []):
+        for scene in scenes:
+            if not isinstance(scene, dict) or not isinstance(scene.get("from"), (int, float)):
+                continue
+            shows_video = scene.get("type") == "speaker" or scene.get("layout") == "split"
+            if shows_video and scene["from"] + 0.3 < join < scene.get("to", 0) - 0.3:
+                warnings.append(
+                    f"The {scene['type']} scene at {scene['from']}s shows his video across the join at {join}s, so the "
+                    "jump will show. Put a full-screen graphic over the join."
+                )
+    on_video = [s for s in scenes if isinstance(s, dict) and (s.get("type") == "speaker" or s.get("layout") == "split")]
+    if clip.get("has_video") and not on_video:
         warnings.append("A video is available but no scene shows the speaker.")
+    for number, scene in enumerate(scenes, 1):
+        rows = scene.get("rows") if isinstance(scene, dict) else None
+        marks = [r.get(f) for r in rows or [] if isinstance(r, dict) for f in ("left_icon", "icon") if r.get(f)]
+        if marks and 0 < sum(m in pictures for m in marks) < len(marks):
+            warnings.append(f"Scene {number} mixes pictures and icons in one table; use one kind so the rows match.")
+    for unused in sorted(pictures - used):
+        warnings.append(f"The picture {unused!r} isn't used by any scene.")
     errors += _check_post(board.get("post"), clip)
     return errors, warnings
+
+
+def _check_pictures(pictures: object) -> tuple[set[str], list[str]]:
+    """The storyboard's generated pictures: {name: description}. Returns the valid names and any errors."""
+    if pictures is None:
+        return set(), []
+    if not isinstance(pictures, dict):
+        return set(), ["pictures must be an object of name: description."]
+    errors, names = [], set()
+    low, high = PICTURE_DESCRIPTION
+    for key, text in pictures.items():
+        if not re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", key):
+            errors.append(f"Picture name {key!r} must be kebab-case, such as gold-chain.")
+            continue
+        if not isinstance(text, str) or not low <= len(text.strip()) <= high:
+            errors.append(f"Picture {key!r} needs a description of {low} to {high} characters.")
+            continue
+        people = sorted(set(re.findall(r"[a-z]+", text.casefold())) & set(PEOPLE_WORDS))
+        if people:
+            errors.append(
+                f"Picture {key!r} would show a person ({', '.join(people)}). Generated pictures show objects and places "
+                "only; people come from the talk's own video."
+            )
+            continue
+        names.add(key)
+    return names, errors
 
 
 def _check_list(values, field, limits, name, begin, end) -> list[str]:
@@ -466,7 +876,12 @@ def render_post(post: dict, clip: dict) -> str:
     lines = [
         f"# {post['youtube_title']}",
         "",
-        f"From {fmt(clip['source_start'])} to {fmt(clip['source_end'])} of the talk ({fmt(clip['duration'])}).",
+        f"From {fmt(clip['source_start'])} to {fmt(clip['source_end'])} of the talk ({fmt(clip['duration'])})"
+        + "".join(
+            f", leaving out {fmt(a[1])} to {fmt(b[0])}"
+            for a, b in zip(clip.get("segments", []), clip.get("segments", [])[1:])
+        )
+        + ".",
         "",
         "## YouTube title",
         "",
@@ -578,9 +993,17 @@ def build_lines(folder: Path) -> list[dict]:
 
 
 def recording(folder: Path, record: dict) -> Path | None:
-    """The file to take sound from: the audio the subtitles were made from, else the video."""
-    key = "audio" if "audio" in record else "video" if "video" in record else None
-    return folder / record[key] if key else None
+    """The file to take sound from. With a video, its own soundtrack: a separate audio download can be offset from the
+    picture (one talk's MP3 ran 36 ms ahead), which shows as lips out of sync. Else the audio file."""
+    if "video" in record:
+        video = folder / record["video"]
+        if not video.exists() or has_sound(video):
+            return video
+    return folder / record["audio"] if "audio" in record else None
+
+
+def has_sound(path: Path) -> bool:
+    return any(stream.get("codec_type") == "audio" for stream in media_info(path).get("streams", []))
 
 
 def cmd_check(args) -> None:
@@ -637,43 +1060,95 @@ def cmd_prepare(args) -> None:
         raise StudioError("This talk has no audio or video. Put the file in its source folder and add it to talk.json.")
     video = folder / record["video"] if "video" in record else None
     cues = parse_srt((folder / record["srt"]).read_text(encoding="utf-8", errors="replace"))
-    words = timed_words(cues)
+    pauses = speech_pauses(media)
+    words = speech_words(cues, pauses)
     for number in args.numbers:
         clip = clips.get(number)
         if not clip:
             raise StudioError(f"There is no clip {number} in clips.md.")
         start, end = clip["start"], clip["end"]
+        segments = trim_long_pauses(segments_of(clip), pauses)
+        trims = len(segments) - len(segments_of(clip))
+        clip = {**clip, "segments": segments}
         target = folder / "clips" / f"{number:02d}-{safe_name(clip['title'], 60)}"
         public = target / "public"
         public.mkdir(parents=True, exist_ok=True)
-        times = ["-ss", f"{start:.3f}", "-to", f"{end:.3f}"]
-        cut(
-            ["ffmpeg", "-y", "-hide_banner", *times, "-i", str(media), "-vn", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
-            + ["-ar", "48000", "-c:a", "aac", "-b:a", "192k", str(public / "audio.m4a")],
-            "the audio",
-        )
+        cut(audio_command(media, segments, public / "audio.m4a"), "the audio")
         if video:
-            scale = "scale='if(gt(ih,1080),-2,iw)':'if(gt(ih,1080),1080,ih)',fps=30,format=yuv420p"
-            cut(
-                ["ffmpeg", "-y", "-hide_banner", *times, "-i", str(video), "-an", "-vf", scale, "-c:v", "libx264"]
-                + ["-preset", "veryfast", "-crf", "20", "-g", "15", str(public / "video.mp4")],
-                "the video",
-            )
+            cut(video_command(video, segments, public / "video.mp4"), "the video")
         duration = round(media_duration(public / "audio.m4a"), 3)
         info = {
             **{key: clip.get(key) for key in ("format", "type", "title", "hook", "caption", "text", "concerns")},
             "number": number,
             "source_start": start,
             "source_end": end,
+            "segments": [[segment["start"], segment["end"]] for segment in segments],
+            "joins": joins_of(clip),
             "duration": duration,
             "has_video": bool(video),
         }
         write_json(target / "clip.json", info)
-        span = (clip["line_start"], clip["line_end"])
-        pages = caption_pages(words, start, end, CAPTION_CHARS[clip["format"]], span)
+        pages = clip_captions(words, clip, CAPTION_CHARS[clip["format"]])
         write_json(target / "captions.json", pages)
+        write_json(target / "words.json", clip_words(words, clip))
+        emphasis = repeated_phrases(pages)
+        if emphasis:
+            info["emphasis"] = emphasis
+            write_json(target / "clip.json", info)
         print(f"Clip {number}: {target}")
         print(f"  {fmt(duration)} ({duration}s), {clip['format']}, {'with' if video else 'no'} speaker video")
+        for item in emphasis[:5]:
+            said = ", ".join(f"{t:.1f}s" for t in item["times"])
+            print(f'  He repeats "{item["text"]}" ({said}): make it a big moment on screen.')
+        if trims:
+            print(
+                f"  Cut {trims} long pause{'s' if trims > 1 else ''} (over {LONG_PAUSE_SECONDS:g}s of silence) out of it."
+            )
+        for join in info["joins"]:
+            print(f"  Joins two pieces at {join}s: cover it with a full-screen graphic, or the cut shows on his video.")
+
+
+SCALE = "scale='if(gt(ih,1080),-2,iw)':'if(gt(ih,1080),1080,ih)',fps=30,format=yuv420p"
+LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"
+EDGE_FADE = 0.03  # seconds of fade at each join, so the sound doesn't click
+LONG_PAUSE_SECONDS = 5.0  # a silence this long inside a clip (a drink of water, a break) is cut out
+PAUSE_KEPT_SECONDS = 0.5  # of such a pause, this much stays on each side
+
+
+def _inputs(path: Path, segments: list[dict]) -> list[str]:
+    command = []
+    for segment in segments:
+        command += ["-ss", f"{segment['start']:.3f}", "-to", f"{segment['end']:.3f}", "-i", str(path)]
+    return command
+
+
+def audio_command(media: Path, segments: list[dict], output: Path) -> list[str]:
+    """ffmpeg command for a clip's sound: its pieces joined with tiny fades, then evened out in loudness."""
+    head = ["ffmpeg", "-y", "-hide_banner", *_inputs(media, segments), "-vn"]
+    tail = ["-ar", "48000", "-c:a", "aac", "-b:a", "192k", str(output)]
+    if len(segments) == 1:
+        return head + ["-af", LOUDNESS] + tail
+    parts = []
+    for index, segment in enumerate(segments):
+        length = segment["end"] - segment["start"]
+        parts.append(
+            f"[{index}:a]afade=t=in:d={EDGE_FADE},afade=t=out:st={length - EDGE_FADE:.3f}:d={EDGE_FADE}[a{index}]"
+        )
+    joined = "".join(f"[a{index}]" for index in range(len(segments)))
+    graph = ";".join(parts) + f";{joined}concat=n={len(segments)}:v=0:a=1,{LOUDNESS}[out]"
+    return head + ["-filter_complex", graph, "-map", "[out]"] + tail
+
+
+def video_command(video: Path, segments: list[dict], output: Path) -> list[str]:
+    """ffmpeg command for a clip's picture: its pieces joined back to back, with no sound."""
+    head = ["ffmpeg", "-y", "-hide_banner", *_inputs(video, segments), "-an"]
+    tail = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-g", "15", str(output)]
+    if len(segments) == 1:
+        return head + ["-vf", SCALE] + tail
+    parts = [f"[{index}:v]{SCALE},setpts=PTS-STARTPTS[v{index}]" for index in range(len(segments))]
+    joined = "".join(f"[v{index}]" for index in range(len(segments)))
+    graph = ";".join(parts) + f";{joined}concat=n={len(segments)}:v=1:a=0[out]"
+    return head + ["-filter_complex", graph, "-map", "[out]"] + tail
 
 
 def load_board(folder: Path, number: int) -> tuple[Path, dict, dict, list[str]]:
@@ -693,9 +1168,14 @@ def write_props(target: Path, clip: dict, board: dict) -> Path:
         "duration": clip["duration"],
         "hasAudio": True,
         "hasVideo": clip["has_video"],
+        "style": board["style"],
         "scenes": board["scenes"],
         "captions": read_json(target / "captions.json"),
+        "pictures": sorted(board.get("pictures") or {}),
     }
+    missing = [n for n in props["pictures"] if not (target / "public" / "pictures" / f"{n}.png").exists()]
+    if missing:
+        raise StudioError(f"Pictures not made yet: {', '.join(missing)}. Run the pictures command first.")
     path = target / "props.json"
     write_json(path, props)
     return path
@@ -709,6 +1189,112 @@ def remotion(command: list[str]) -> None:
         raise StudioError("Remotion stopped with an error (see above).")
 
 
+GRAPHIC_LEAD_SECONDS = 0.15  # a graphic appears this much before its first word, as he starts to say it
+EARLY_GRAPHIC_SECONDS = 1.0  # the check warns when a graphic is up this long before its words are said
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.sub(r"[^\w\s'-]", " ", text.lower()).split() if t]
+
+
+def scene_phrase(scene: dict) -> str:
+    """The words a graphic shows that he says aloud: what it should appear with."""
+    return str(scene.get("headline") or scene.get("text") or scene.get("title") or "")
+
+
+def spoken_at(phrase: str, words: list[dict], low: float, high: float, near: float | None = None) -> float | None:
+    """When he starts saying `phrase`, searching the words spoken between `low` and `high`: the start of the stretch
+    that says most of its words in order. None when the phrase isn't really said there (a paraphrase)."""
+    wanted = [t for t in _tokens(phrase) if t not in EMPHASIS_SMALL_WORDS] or _tokens(phrase)
+    if not wanted:
+        return None
+    heard = [(t, w["at"]) for w in words if low <= w["at"] <= high for t in _tokens(w["text"])[:1]]
+    found = []
+    for at, (token, when) in enumerate(heard):
+        if token not in wanted:
+            continue
+        window = {t for t, _ in heard[at : at + len(_tokens(phrase)) + 4]}
+        found.append((sum(t in window for t in wanted) / len(wanted), when))
+    if not found or max(score for score, _ in found) < 0.6:
+        return None
+    best = max(score for score, _ in found)
+    # said more than once (he repeats a point): the saying nearest where the graphic was put is the one it marks
+    return min((when for score, when in found if score >= best - 1e-9), key=lambda when: abs(when - (near or low)))
+
+
+def align_graphics(board: dict, words: list[dict], duration: float) -> list[str]:
+    """Move each graphic to start as he says its words, and each table row, list item or story line to appear as it
+    is said. A graphic moved later leaves its old start to the speaker, so the graphic before it doesn't overstay.
+    Returns what moved."""
+    scenes, moved = board["scenes"], []
+    index = 1
+    while index < len(scenes):
+        scene, before = scenes[index], scenes[index - 1]
+        if scene["type"] != "speaker":
+            said = spoken_at(scene_phrase(scene), words, scene["from"] - 8, scene["to"] + 4, scene["from"])
+            if said is not None:
+                target = max(round(said - GRAPHIC_LEAD_SECONDS, 2), before["from"] + MIN_SCENE_SECONDS)
+                after = scenes[index + 1] if index + 1 < len(scenes) else None
+                # moving later, the graphic keeps its length: the speaker after it gives up the time
+                stretch = target > scene["from"] and after is not None and after["type"] == "speaker"
+                end = scene["to"]
+                if stretch:
+                    end = min(scene["to"] + target - scene["from"], after["to"] - MIN_SCENE_SECONDS)
+                target = round(min(target, end - MIN_SCENE_SECONDS), 2)
+                if abs(target - scene["from"]) >= 0.3:
+                    moved.append(f'{scene["type"]} "{scene_phrase(scene)[:40]}": {scene["from"]}s -> {target}s')
+                    later = target - scene["from"]
+                    if stretch:
+                        scene["to"] = after["from"] = round(min(scene["to"] + later, end), 2)
+                    if later >= MIN_SCENE_SECONDS and before["type"] != "speaker":
+                        scenes.insert(index, {"type": "speaker", "from": scene["from"], "to": target})
+                        index += 1
+                    else:
+                        before["to"] = target
+                    scene["from"] = target
+            for field in ("rows", "items", "lines", "chips"):
+                for entry in scene.get(field) or []:
+                    if not isinstance(entry, dict):
+                        continue
+                    text = entry.get("left") or entry.get("text") or ""
+                    when = spoken_at(text, words, scene["from"], scene["to"], entry.get("at"))
+                    at = when - GRAPHIC_LEAD_SECONDS if when is not None else entry.get("at")
+                    if at is not None:
+                        entry["at"] = round(min(max(at, scene["from"] + 0.2), scene["to"] - 0.5), 2)
+        index += 1
+    scenes[-1]["to"] = duration
+    return moved
+
+
+def early_graphics(board: dict, words: list[dict]) -> list[str]:
+    """Graphics that come up well before he says their words."""
+    found = []
+    for index, scene in enumerate(board["scenes"][1:], 2):
+        if scene["type"] == "speaker":
+            continue
+        said = spoken_at(scene_phrase(scene), words, scene["from"] - 8, scene["to"] + 4, scene["from"])
+        if said is not None and said - scene["from"] > EARLY_GRAPHIC_SECONDS:
+            found.append(
+                f"Scene {index} ({scene['type']}) is up {said - scene['from']:.1f}s before he says its words. Run align."
+            )
+    return found
+
+
+def cmd_align(args) -> None:
+    """Time each graphic, and each row of a table or list, to when he says its words."""
+    folder = talk_folder(args.talk)
+    for number in args.numbers:
+        target = clip_folder(folder, number)
+        clip, board = read_json(target / "clip.json"), read_json(target / "storyboard.json")
+        if not (target / "words.json").exists():
+            raise StudioError(f"Clip {number} has no words.json yet. Run prepare again.")
+        moved = align_graphics(board, read_json(target / "words.json"), clip["duration"])
+        write_json(target / "storyboard.json", board)
+        print(f"Clip {number}: {len(moved)} graphic{'s' if len(moved) != 1 else ''} moved to their words")
+        for line in moved:
+            print(f"  {line}")
+
+
 def cmd_storyboard(args) -> None:
     """Check a storyboard and write the frames to look at."""
     folder = talk_folder(args.talk)
@@ -718,6 +1304,9 @@ def cmd_storyboard(args) -> None:
         print(
             f"Clip {number}: storyboard is valid, {len(board['scenes'])} scenes, speaker on screen {speaker:.0f}s of {clip['duration']:.0f}s"
         )
+        words_file = clip_folder(folder, number) / "words.json"
+        if words_file.exists():
+            warnings = warnings + early_graphics(board, read_json(words_file))
         for warning in warnings:
             print(f"  Warning: {warning}")
 
@@ -734,12 +1323,266 @@ def cmd_preview(args) -> None:
     frames_dir.mkdir()
     last = round(clip["duration"] * FPS) - 1
     for index, scene in enumerate(board["scenes"], 1):
-        frame = min(last, max(0, round((scene["from"] + (scene["to"] - scene["from"]) * 0.8) * FPS)))
+        # late in the scene, so everything has appeared; tables and lists build row by row, so at their very end
+        share = 0.95 if any(scene.get(field) for field in ("rows", "items", "lines", "chips")) else 0.8
+        frame = min(last, max(0, round((scene["from"] + (scene["to"] - scene["from"]) * share) * FPS)))
         remotion(
             ["still", "src/index.ts", "Clip", str(frames_dir / f"scene-{index:02d}-{scene['type']}.jpg")]
             + [f"--frame={frame}", f"--props={props}", f"--public-dir={target / 'public'}", "--log=error"]
         )
     print(f"Look at the frames in {frames_dir}")
+
+
+def gemini_key() -> str:
+    """The Gemini key from the environment, or from the macOS Keychain. Never printed or written anywhere."""
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if key:
+        return key
+    if shutil.which("security"):
+        found = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_ITEM, "-w"], capture_output=True, text=True
+        )
+        if found.returncode == 0 and found.stdout.strip():
+            return found.stdout.strip()
+    raise StudioError(
+        "No Gemini key. Set GEMINI_API_KEY, or store it once in the Keychain from your own terminal:\n"
+        f'  security add-generic-password -s {KEYCHAIN_ITEM} -a "$USER" -w'
+    )
+
+
+def _gemini(path: str, key: str, body: dict | None = None) -> dict:
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        f"{GEMINI_API}/{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors="replace")[:400]
+        raise StudioError(f"Gemini said {error.code}: {detail}") from None
+
+
+def image_model(key: str) -> str:
+    """STUDIO_IMAGE_MODEL, or the newest Gemini image model this key can use (a pro one first)."""
+    if os.environ.get("STUDIO_IMAGE_MODEL"):
+        return os.environ["STUDIO_IMAGE_MODEL"]
+    models = _gemini("models?pageSize=1000", key).get("models", [])
+    usable = [
+        m["name"].removeprefix("models/")
+        for m in models
+        if "image" in m["name"]
+        and "imagen" not in m["name"]
+        and "generateContent" in m.get("supportedGenerationMethods", [])
+    ]
+    if not usable:
+        raise StudioError("This Gemini key has no image model. Set STUDIO_IMAGE_MODEL to one that it can use.")
+
+    def rank(name: str):
+        version = [int(n) for n in re.findall(r"\d+", name.split("-image")[0])[:2]]
+        return ("pro" in name, version, "preview" not in name)
+
+    return max(usable, key=rank)
+
+
+def picture_prompt(description: str, style: str) -> str:
+    return (
+        f"{description.strip().rstrip('.')}. Drawn as {PICTURE_STYLES[style]}. "
+        "Make it a single die-cut sticker: the object alone, whole and centred, filling most of the square, with a thick "
+        "clean white border that follows its outline. Put it on a perfectly flat, solid pure green (#00FF00) background "
+        "with nothing else on it. No text, letters or numbers, no people, no hands, no faces, no frame, no shadow on the "
+        "background."
+    )
+
+
+def key_out(raw: bytes):
+    """A transparent PNG from a sticker on a flat green background: clear the background (what touches the edges, and
+    any key green left inside, such as the hole of a coiled chain), drop stray specks, soften the cut and trim."""
+    import io
+
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter
+
+    image = Image.open(io.BytesIO(raw)).convert("RGBA")
+    width, height = image.size
+    seeds = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+    seeds += [(width // 2, 0), (width // 2, height - 1), (0, height // 2), (width - 1, height // 2)]
+    ground = np.median([image.getpixel(seed)[:3] for seed in seeds], axis=0)
+    for seed in seeds:
+        if image.getpixel(seed)[3]:
+            ImageDraw.floodfill(image, seed, (0, 0, 0, 0), thresh=90)
+    rgba = np.array(image).astype(np.int16)
+    r, g, b = rgba[..., 0], rgba[..., 1], rgba[..., 2]
+    # only the background's own green: a leaf inside the sticker is a different, darker green
+    near = np.sqrt(((rgba[..., :3] - ground) ** 2).sum(axis=-1)) < 70
+    key = near & (g - np.maximum(r, b) > 80)
+    rgba[..., 3][key] = 0
+    solid = rgba[..., 3] > 0
+    solid &= _main_parts(solid)
+    alpha = Image.fromarray((solid * 255).astype(np.uint8))
+    alpha = alpha.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.8))
+    rgba[..., 3] = np.array(alpha)
+    # take the green cast off the soft edge
+    edge = (rgba[..., 3] < 250) & (g > np.maximum(r, b))
+    rgba[..., 1][edge] = np.maximum(r, b)[edge]
+    image = Image.fromarray(rgba.clip(0, 255).astype(np.uint8), "RGBA")
+    box = image.getbbox()
+    if not box:
+        raise StudioError("A picture came back empty after removing its background.")
+    image = image.crop(box)
+    side = max(image.size)
+    square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
+    return square.resize((1024, 1024), Image.LANCZOS)
+
+
+def _main_parts(solid):
+    """The sticker's own pieces: connected areas at least a twentieth the size of the biggest, without stray specks."""
+    import numpy as np
+
+    height, width = solid.shape
+    step = max(1, max(height, width) // 256)
+    small = solid[::step, ::step]
+    labels = np.zeros(small.shape, dtype=np.int32)
+    sizes = [0]
+    for start in zip(*np.nonzero(small)):
+        if labels[start]:
+            continue
+        label = len(sizes)
+        labels[start] = label
+        stack, size = [start], 0
+        while stack:
+            y, x = stack.pop()
+            size += 1
+            for ny, nx in ((y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)):
+                if 0 <= ny < small.shape[0] and 0 <= nx < small.shape[1] and small[ny, nx] and not labels[ny, nx]:
+                    labels[ny, nx] = label
+                    stack.append((ny, nx))
+        sizes.append(size)
+    if len(sizes) == 1:
+        return solid
+    keep = np.array([size >= max(sizes) / 20 for size in sizes])
+    keep[0] = False
+    big = np.repeat(np.repeat(keep[labels], step, axis=0), step, axis=1)[:height, :width]
+    return big
+
+
+def generate_picture(description: str, style: str, key: str, model: str) -> bytes:
+    import base64
+
+    reply = _gemini(
+        f"models/{model}:generateContent",
+        key,
+        {
+            "contents": [{"parts": [{"text": picture_prompt(description, style)}]}],
+            "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "1:1"}},
+        },
+    )
+    for candidate in reply.get("candidates", []):
+        for part in candidate.get("content", {}).get("parts", []):
+            data = (part.get("inlineData") or part.get("inline_data") or {}).get("data")
+            if data:
+                return base64.b64decode(data)
+    reason = (reply.get("candidates") or [{}])[0].get("finishReason") or reply.get("promptFeedback")
+    raise StudioError(f"Gemini returned no image ({reason}).")
+
+
+def picture_uses(board: dict, captions: list[dict]) -> dict[str, list[str]]:
+    """For each picture: where it appears ("0:12 punch, on screen: ...") and what is said there."""
+    uses: dict[str, list[str]] = {name: [] for name in board.get("pictures") or {}}
+    for scene in board["scenes"]:
+        named = [scene.get("hero"), *(scene.get("art") or [])]
+        for row in scene.get("rows") or []:
+            named += [row.get("left_icon"), row.get("icon")]
+        shown = scene.get("headline") or scene.get("text") or scene.get("title") or ""
+        said = " ".join(c["text"] for c in captions if c["to"] > scene["from"] and c["from"] < scene["to"])
+        for name in dict.fromkeys(n for n in named if n in uses):
+            line = f"{fmt(scene['from'])} {scene['type']}"
+            if shown:
+                line += f", on screen: {shown}"
+            uses[name].append(line)
+            uses[name].append(f"    said: {said[:150]}{'...' if len(said) > 150 else ''}")
+    return uses
+
+
+def picture_sheet(board: dict, captions: list[dict], folder: Path, output: Path) -> None:
+    """Every picture of a clip on its look's background, with its description, where it appears and what is said
+    there, so the user can judge each one in context."""
+    import textwrap
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    style = board["style"]
+    uses = picture_uses(board, captions)
+    cell, width, pad = 320, 1500, 24
+    ink, soft = "#2a2218", "#6b5f4e"
+    title, body = ImageFont.load_default(size=34), ImageFont.load_default(size=23)
+    rows = []
+    for name, description in (board.get("pictures") or {}).items():
+        lines = textwrap.wrap(description, 80) + [""]
+        uses[name] = [
+            u.replace("\u2014", " - ").replace("\u2013", " - ") for u in uses[name]
+        ]  # the sheet's font has no dashes
+        for use in uses[name] or ["(not used)"]:
+            lines += textwrap.wrap(use, 92, subsequent_indent="      ")
+        rows.append((name, lines, max(cell, 70 + 30 * len(lines))))
+    sheet = Image.new("RGB", (width, sum(h for *_, h in rows) + pad), LOOK_GROUNDS[style])
+    draw = ImageDraw.Draw(sheet)
+    y = pad
+    for name, lines, height in rows:
+        picture = Image.open(folder / f"{name}.png").resize((cell - 2 * pad, cell - 2 * pad))
+        sheet.paste(picture, (pad, y), picture)
+        draw.text((cell + pad, y + 6), name, fill=ink, font=title)
+        for i, line in enumerate(lines):
+            draw.text(
+                (cell + pad, y + 56 + 30 * i),
+                line,
+                fill=ink if line.startswith(("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")) else soft,
+                font=body,
+            )
+        y += height
+        draw.line((pad, y - 6, width - pad, y - 6), fill=soft, width=1)
+    sheet.save(output, quality=88)
+
+
+def cmd_pictures(args) -> None:
+    """Make each clip's generated pictures with Gemini (once per talk and look), and a sheet to approve them by."""
+    folder = talk_folder(args.talk)
+    key = model = None
+    for number in args.numbers:
+        target, _clip, board, _warnings = load_board(folder, number)
+        wanted = board.get("pictures") or {}
+        if not wanted:
+            print(f"Clip {number}: the storyboard asks for no pictures.")
+            continue
+        style = board["style"]
+        store = folder / "pictures" / style
+        store.mkdir(parents=True, exist_ok=True)
+        public = target / "public" / "pictures"
+        public.mkdir(parents=True, exist_ok=True)
+        for name, description in wanted.items():
+            png, raw, note = store / f"{name}.png", store / f"{name}.raw.png", store / f"{name}.json"
+            prompt = picture_prompt(description, style)
+            known = read_json(note) if note.exists() else {}
+            if raw.exists() and known.get("prompt") == prompt and name not in (args.redo or []):
+                print(f"  {name}: already made")
+            else:
+                if key is None:
+                    key = gemini_key()
+                    model = image_model(key)
+                    print(f"Making pictures with {model}")
+                print(f"  {name}: making")
+                raw.write_bytes(generate_picture(description, style, key, model))
+                write_json(note, {"prompt": prompt, "model": model})
+            key_out(raw.read_bytes()).save(png)  # cutting out is free, so redo it every time
+            shutil.copyfile(png, public / f"{name}.png")
+        sheet = target / "pictures.jpg"
+        picture_sheet(board, read_json(target / "captions.json"), store, sheet)
+        print(f"Clip {number}: look at {sheet}")
 
 
 def cmd_render(args) -> None:
@@ -824,6 +1667,10 @@ def main(argv: list[str] | None = None) -> int:
     add("check", cmd_check)
     add("prepare", cmd_prepare).add_argument("numbers", type=int, nargs="+")
     add("storyboard", cmd_storyboard).add_argument("numbers", type=int, nargs="+")
+    add("align", cmd_align).add_argument("numbers", type=int, nargs="+")
+    pictures = add("pictures", cmd_pictures)
+    pictures.add_argument("numbers", type=int, nargs="+")
+    pictures.add_argument("--redo", nargs="+", metavar="NAME", help="Make these pictures again")
     add("preview", cmd_preview).add_argument("number", type=int)
     add("render", cmd_render).add_argument("numbers", type=int, nargs="+")
     add("status", cmd_status, talk=False)

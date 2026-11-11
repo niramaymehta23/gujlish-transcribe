@@ -40,7 +40,7 @@ talks/<YouTube title>/
     post.md                     title, description and caption
     storyboard.json             the plan for the video
     preview/                    a frame of each scene
-remotion/                       the look of the videos (colours and name in src/theme.ts)
+remotion/                       the look of the videos: four styles in src/looks.ts, their backdrops in src/backdrops.tsx
 tools/studio.py                 names, limits, cuts, checks and rendering
 ```
 
