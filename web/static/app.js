@@ -2,6 +2,11 @@ const $ = id => document.getElementById(id);
 // runs: the sidebar list. jobId: the run on screen ('upload' while a file is uploading). current: its finished transcript.
 let runs = [], jobId = null, shown = null, current = null, upload = null;
 let pollTimer = null, runsTimer = null, pollFailures = 0, noticeTimer = null;
+// Live updates cost server time (on a hosted site, a server kept awake), so they run only while you are here: they
+// pause when the tab is hidden, after IDLE_MS without a click or key press, and after MAX_POLL_FAILURES failed tries
+// in a row. Coming back, clicking or typing picks them up again.
+const IDLE_MS = 30 * 60 * 1000, MAX_POLL_FAILURES = 6;
+let lastActivity = Date.now(), napping = false, wasBusy = false;
 let renderedFor = null, renderedRev = null, caps = null, tab = 'transcript', stageNotice = '', stageAction = 'english';
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
 const TABS = ['transcript', 'gujlish', 'translation', 'summary'];
@@ -29,6 +34,28 @@ const wordKey = word => word.normalize('NFC').toLowerCase().replace(EDGE, '');
 const postJson = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const narrow = () => window.matchMedia('(max-width: 760px)').matches;
 
+// Whether live updates may ask the server again: the tab is on screen and you were active recently.
+function awake() {
+  if (document.hidden) return false;
+  if (Date.now() - lastActivity < IDLE_MS) return true;
+  if (!napping) { napping = true; $('run-notice').textContent = 'Live updates paused while you were away. Click anywhere to refresh.'; }
+  return false;
+}
+function later(fn, ms) { return awake() ? setTimeout(fn, ms) : null; }
+async function loadUsage() {
+  const box = $('gpu-usage');
+  if (!box) return;
+  try {
+    const response = await fetch('/api/usage');
+    if (!response.ok) return;
+    const data = await response.json();
+    if (!data.gpu) return;
+    const used = data.seconds < 3600 ? `${Math.round(data.seconds / 60)} min` : `${(data.seconds / 3600).toFixed(1)} h`;
+    box.textContent = ` · GPU this month: ${used}${data.cap_hours ? ` of ${data.cap_hours} h` : ''} · ≈ £${data.cost.toFixed(2)}`;
+    box.classList.toggle('over', data.over_cap);
+    box.hidden = false;
+  } catch { /* the line is only informative */ }
+}
 function note(text) {
   clearTimeout(noteTimer); $('edit-note').textContent = text;
   noteTimer = setTimeout(() => { $('edit-note').textContent = ''; }, 6000);
@@ -128,7 +155,12 @@ async function loadRuns() {
     if (signedOut(response)) return;
     if (response.ok) { runs = await response.json(); renderRuns(); }
   } catch { /* the server may be restarting: try again shortly */ }
-  runsTimer = setTimeout(loadRuns, upload || runs.some(busyRun) ? 3000 : 20000);
+  // Ask again only while something is in progress and you are here. When idle the list refreshes when you come back
+  // to the page, so an open tab never keeps the hosted server awake.
+  const isBusy = Boolean(upload) || runs.some(busyRun);
+  if (wasBusy && !isBusy) loadUsage();  // a run just finished: its GPU time is counted now
+  wasBusy = isBusy;
+  if (isBusy) runsTimer = later(loadRuns, 3000);
 }
 function mergeRun(job) {
   const run = runs.find(item => item.id === job.id);
@@ -230,17 +262,22 @@ async function poll() {
     mergeRun(job); renderHead(job);
     if (job.status === 'complete') {
       renderResult(job);
-      if (STAGE_KEYS.some(key => running(job[key]))) pollTimer = setTimeout(poll, 1500);
+      if (STAGE_KEYS.some(key => running(job[key]))) pollTimer = later(poll, 1500);
       return;
     }
     current = null; renderStatus(job);
-    if (ACTIVE.includes(job.status)) pollTimer = setTimeout(poll, 1000);
+    if (ACTIVE.includes(job.status)) pollTimer = later(poll, 1500);
   } catch {
     if (jobId !== id) return;
     // Cloud Run sometimes swaps the server's machine; the new one picks the run up again within seconds.
     pollFailures++;
+    if (pollFailures >= MAX_POLL_FAILURES) {
+      $('run-notice').textContent = `Lost the connection to ${SERVER}. Click anywhere or come back to this tab to try again.`;
+      napping = true;
+      return;
+    }
     if (pollFailures > 2) notice(`Reconnecting to ${SERVER}…`);
-    pollTimer = setTimeout(poll, Math.min(10000, 1000 * pollFailures));
+    pollTimer = later(poll, Math.min(10000, 1000 * pollFailures));
   }
 }
 function renderResult(job) {
@@ -811,11 +848,21 @@ function dictionaryRow(text, detail, forget, rule = null) {
   return row;
 }
 
-// Coming back to the tab: refresh at once rather than waiting for the next timer.
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) return;
-  loadRuns();
+// Coming back to the tab or window: refresh at once, since nothing re-checks while the page is idle or hidden.
+let lastReturn = 0;
+function welcomeBack() {
+  if (document.hidden || Date.now() - lastReturn < 2000) return;  // switching tabs fires both events
+  lastReturn = Date.now(); lastActivity = Date.now();
+  if (napping) { napping = false; $('run-notice').textContent = ''; }
+  loadRuns(); loadUsage();
   if (jobId && jobId !== 'upload') { pollFailures = 0; poll(); }
-});
+}
+document.addEventListener('visibilitychange', welcomeBack);
+window.addEventListener('focus', welcomeBack);
+// A click or key press counts as being here; after a pause it refreshes at once.
+for (const type of ['pointerdown', 'keydown']) {
+  document.addEventListener(type, () => { lastActivity = Date.now(); if (napping) welcomeBack(); }, { passive: true });
+}
+loadUsage();
 loadDictionary();
 loadRuns().then(() => { const saved = sessionStorage.getItem('asr-job'); select(saved && runs.some(run => run.id === saved) ? saved : null); });

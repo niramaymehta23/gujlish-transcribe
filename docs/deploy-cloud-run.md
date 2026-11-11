@@ -1,6 +1,11 @@
 # Putting the transcriber online with Google Cloud Run
 
-This runs the web app on Google Cloud Run with one NVIDIA L4 GPU that **scales to zero**: when nobody is using the site, nothing runs and nothing is billed. The first visitor after a quiet spell waits for the machine to start and the model to load (expect around a minute or two); after that it is fast.
+This runs the transcriber on Google Cloud Run in two parts:
+
+- **The website** (`SERVICE`): a small **CPU-only** service that scales to zero when nobody uses it. Anyone with the link (and the password) can open it from any device or network. Opening it, leaving a tab open, sharing the link or a bot visiting it never switches on a GPU.
+- **The GPU job** (`GPU_JOB`): a Cloud Run job with one NVIDIA L4 GPU. The website starts one run of it for each recording; it transcribes, saves the transcript to the bucket and exits. **The GPU is billed only while a recording is being transcribed.**
+
+Each transcription waits a minute or two for the job to start and load the model; Gujlish, translation, captions and summaries run on the website and start at once.
 
 ## Before you start: the Flex license
 
@@ -50,15 +55,53 @@ deploy/deploy.sh
 
 The script builds the image on Google Cloud Build (the first build downloads PyTorch and the model, so allow 15–30 minutes), then deploys it. It prints the site's address (`https://…run.app`) at the end. Run the same command to ship later changes.
 
-Main Cloud Run settings, all in `deploy/deploy.sh`:
+Main Cloud Run settings, all in `deploy/deploy.sh` and `deploy/config.sh`:
 
-- **One L4 GPU, 4 CPUs, 16 GB memory**, at most **one instance**, so the bill can't multiply and there is a single transcription queue.
-- **Minimum zero instances**, so you pay nothing while idle. Setting a minimum of 1 removes cold starts but bills around the clock.
+- **Website:** 1 CPU, 4 GB memory, **no GPU**, at most one instance, minimum zero. The script checks after every deploy that the website has no GPU, and takes it offline if it does.
+- **GPU job:** one L4 GPU, 4 CPUs, 16 GB memory, one task, no automatic retries. Each run has a time limit from the recording's length (30 minutes to 3 hours), so a stuck job cannot run on.
+- **One transcription at a time.** Recordings queue on the website and show how many are ahead.
 - **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`, with one copy of each recording: `recordings/.fingerprints.json` keeps each file's SHA-256, and each time an instance starts it merges identical copies and removes leftovers from uploads that never became a run. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
 ## Costs
 
-You pay for the GPU instance while it runs: while it works, and for a short idle period afterwards before it scales to zero. Smaller charges cover storage, builds and the image repository. Check current rates on Google's [Cloud Run pricing page](https://cloud.google.com/run/pricing) for your region. As a rough guide, an L4 GPU instance costs on the order of a dollar per hour while running.
+**What you pay for:**
+
+| Part | When it is billed | Rough cost (Singapore, Nov 2026) |
+| --- | --- | --- |
+| GPU job | Only while a recording is being transcribed, plus a minute or two to start | about £0.77 an hour |
+| Website | While someone is using it, and about 15 minutes after | about £0.07 an hour |
+| Images, builds, bucket | Storage, and about 10 minutes of build per deploy | under £2 a month |
+
+Check current rates on Google's [Cloud Run pricing page](https://cloud.google.com/run/pricing).
+
+**Why it is split:** until November 2026 the website itself had the GPU. Any request kept it switched on, and an open tab that asked for the run list every 20 seconds kept a GPU running for days: about 30 billed hours (£23.59) for roughly 3 hours of real transcription. Now the website has no GPU, and the page only asks the server for updates while something is running and you are on the page.
+
+**Guardrails** (`deploy/guardrails.sh`, run by every deploy):
+
+- **Monthly GPU limit:** the site starts no new transcriptions once the GPU job has run `GPU_HOURS_PER_MONTH` hours this month (default 5). The top bar shows this month's GPU time and its estimated cost. Each run's time is logged in the bucket under `usage/<month>/`.
+- **Alert emails** (set `ALERT_EMAIL`): when the GPU job runs more than `ALERT_GPU_HOURS_PER_DAY` hours in a day, or the website stays up more than `ALERT_WEB_HOURS_PER_DAY`.
+- **Budget and kill switch** (set `BILLING_ACCOUNT`; needs billing-account admin rights): a `BUDGET_GBP` monthly budget with emails at 50%, 90% and 100%. At 100% a small function takes the website offline and cancels any running GPU job.
+- **Pause and stop end the GPU job at once.** Pausing, stopping or deleting a run cancels its GPU job; the site keeps cancelling until Google confirms it has ended (for up to 5 minutes), and a website that restarts meanwhile still treats the run as paused and cancels any job left running. Resume starts a new job that carries on from the chunks already done, so nothing is billed while a run is paused.
+- **Never from your own computer:** the website uses the GPU job only when it runs on Cloud Run itself. `python app.py` always transcribes on the computer it runs on; the only outside service it calls is Gemini, for translation and summaries.
+- **Image cleanup:** only the newest 2 images are kept, and each build reuses the previous image's layers instead of downloading the models again.
+
+**Checking what is running:**
+
+```bash
+gcloud run jobs executions list --job gujarati-transcriber-gpu --region asia-southeast1
+```
+
+**Taking the site offline by hand** (deploying again brings it back):
+
+```bash
+gcloud run services remove-iam-policy-binding gujarati-transcriber --region asia-southeast1 --member=allUsers --role=roles/run.invoker
+```
+
+**Bringing it back without a deploy:**
+
+```bash
+gcloud run services add-iam-policy-binding gujarati-transcriber --region asia-southeast1 --member=allUsers --role=roles/run.invoker
+```
 
 ## Translation and summaries online
 
@@ -66,6 +109,7 @@ You pay for the GPU instance while it runs: while it works, and for a short idle
 
 ## Known limitations
 
-- **The instance can stop mid-job.** Cloud Run sometimes replaces the instance, and may shut it down when nobody has the page open. Each run keeps its state in its folder in the bucket (`.run.json`), so the next instance lists it, opens it by the same link and resumes unfinished transcription or translation from the last saved point. After three restarts in a row it waits for you to press **Resume** instead. Work only continues while an instance is running, so a job that stopped while the site was closed resumes on the next visit.
-- **One transcription at a time.** Recordings queue for the GPU and show how many are ahead. Gujlish, translation and summaries run on a separate queue, so they don't wait for transcriptions.
-- **Cold starts.** The first request after an idle period waits for the instance and model to load.
+- **The website sleeps; the GPU job does not.** The website scales to zero when nobody has the page open, but a GPU job it started keeps going and saves its transcript to the bucket. The run's state file (`.run.json`) records the job, so on the next visit the website follows it again, or carries on with Gujlish if it has finished, instead of starting a second one.
+- **The website can stop mid-step.** Cloud Run sometimes replaces it. Each run keeps its state in its folder in the bucket, so the next instance lists it, opens it by the same link and resumes unfinished work from the last saved point. After three restarts in a row it waits for you to press **Resume** instead.
+- **Live updates pause.** The page stops asking for updates when the tab is hidden, after 30 minutes without a click or key press, or after repeated failed tries. Clicking or coming back to the tab refreshes it.
+- **Start-up time.** Each transcription waits for the GPU job to start and load the model, and the first page after a quiet spell waits for the website to start.

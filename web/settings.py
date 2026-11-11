@@ -17,6 +17,17 @@ def _number(name: str, default: float) -> float:
     return float(value) if value else default
 
 
+def _gpu_job() -> str:
+    """The Cloud Run GPU job to transcribe on, only when this site itself runs on Cloud Run (which sets K_SERVICE).
+    Anywhere else, e.g. `python app.py` on a Mac, transcription always runs on this computer: a local test never
+    starts a paid Google GPU, whatever the environment says."""
+    job = os.environ.get("GUJLISH_GPU_JOB", "").strip()
+    if job and not os.environ.get("K_SERVICE"):
+        print("GUJLISH_GPU_JOB ignored: not running on Cloud Run, so transcription runs on this computer.", flush=True)
+        return ""
+    return job
+
+
 @dataclass(frozen=True)
 class Settings:
     hosted: bool = False
@@ -30,6 +41,14 @@ class Settings:
     # Gemini runs on the owner's API key, so a hosted site offers it only when explicitly allowed.
     allow_gemini: bool = True
     models: tuple[str, ...] = field(default=MODELS)
+    # Hosted: transcription runs on this Cloud Run GPU job (web/cloudjobs.py), so the website needs no GPU.
+    gpu_job: str = ""
+    project: str = ""
+    region: str = ""
+    # Stop starting transcriptions once the GPU has run this many hours this month (UTC). 0 = no limit.
+    gpu_hours_per_month: float = 5
+    # For the page's cost estimate: what an hour of the GPU job costs (L4 + 4 vCPU + 16 GiB, Singapore, Nov 2026).
+    gpu_pounds_per_hour: float = 0.77
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -47,7 +66,14 @@ class Settings:
             retention_hours=_number("GUJLISH_RETENTION_HOURS", 24 if hosted else 0),
             allow_gemini=_flag("GUJLISH_ALLOW_GEMINI") if hosted else True,
             models=models,
+            gpu_job=_gpu_job(),
+            project=os.environ.get("GUJLISH_PROJECT", "").strip(),
+            region=os.environ.get("GUJLISH_REGION", "").strip(),
+            gpu_hours_per_month=_number("GUJLISH_GPU_HOURS_PER_MONTH", 5),
+            gpu_pounds_per_hour=_number("GUJLISH_GPU_POUNDS_PER_HOUR", 0.77),
         )
+        if settings.gpu_job and not (settings.project and settings.region):
+            raise ValueError("GUJLISH_GPU_JOB needs GUJLISH_PROJECT and GUJLISH_REGION too")
         if hosted and len(settings.secret_key) < 32:
             raise ValueError("GUJLISH_HOSTED needs GUJLISH_SECRET_KEY set to a random value of at least 32 characters")
         return settings

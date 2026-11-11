@@ -1,4 +1,6 @@
 # Builds the image on Google Cloud (no local Docker needed). Run through deploy/deploy.sh.
+# The previous image ("latest") is the build cache, so a deploy reuses its layers (above all the multi-GB model
+# layer) instead of downloading the models again and storing another full copy of them.
 steps:
   - name: gcr.io/cloud-builders/docker
     entrypoint: bash
@@ -7,12 +9,14 @@ steps:
     args:
       - -c
       - |
+        docker pull ${_CACHE} || echo "No previous image to reuse: building from scratch."
         printf '%s' "$$HF_TOKEN" > /tmp/hf_token
-        docker build --secret id=hf_token,src=/tmp/hf_token --build-arg MODELS=${_MODELS} -t ${_IMAGE} .
+        docker build --secret id=hf_token,src=/tmp/hf_token --build-arg MODELS=${_MODELS} \
+          --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from ${_CACHE} -t ${_IMAGE} -t ${_CACHE} .
         status=$$?
         rm -f /tmp/hf_token
         exit $$status
-images: ["${_IMAGE}"]
+images: ["${_IMAGE}", "${_CACHE}"]
 availableSecrets:
   secretManager:
     - versionName: projects/${PROJECT_ID}/secrets/gujlish-hf-token/versions/latest
