@@ -377,7 +377,7 @@ button.activity-row:hover{background:var(--hover)}
   .top-actions .btn{width:40px;min-height:40px;padding:0}
   .top-actions .count{display:none}
   .btn-text{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
-  .only-phone{display:block}
+  .only-phone{display:block} .only-wide{display:none}
   .column{padding:4px 16px 180px}
   .title{font-size:34px} .hero{font-size:44px}
   .title.long{font-size:26px}
@@ -391,7 +391,10 @@ button.activity-row:hover{background:var(--hover)}
   .phases li+li::before{display:none}
   .sheet{padding:18px 16px} .line{grid-template-columns:40px minmax(0,1fr);gap:8px}
   .w .main{font-size:20px} .w .main.latin{font-size:17px}
-  .thread{width:12px;margin:0 2px}
+  /* The steps as a stepper on one line: each name under its dot, the lines stretching between them. */
+  .steps{flex-wrap:nowrap;align-items:flex-start;margin-top:20px}
+  .step{flex-direction:column;gap:4px;min-height:0;padding:6px 4px;border-radius:14px;font-size:12px;white-space:nowrap}
+  .thread{flex:1 1 0;width:auto;min-width:6px;margin:17px 2px 0}
   .summary{padding:20px 16px}
   .pop{top:auto;bottom:0;right:0;left:0;width:auto;max-height:85vh;border-radius:22px 22px 0 0;padding:20px 16px 24px}
   .dock-wrap{bottom:12px;padding:0 12px}
@@ -406,5 +409,9 @@ button.activity-row:hover{background:var(--hover)}
   .island-dot .ring{width:30px;height:30px}
   .dock-note{font-size:11px}
   .fixer{padding:14px}
+}
+@media (max-width:360px){
+  .step{padding:6px 2px;font-size:11px}
+  .thread{min-width:4px;margin:17px 1px 0}
 }
 @media (prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
