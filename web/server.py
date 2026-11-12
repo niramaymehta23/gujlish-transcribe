@@ -230,9 +230,10 @@ def stopped_at(job: dict) -> str:
 
 
 def gpu_timeout(duration: float | None) -> int:
-    """Longest a GPU job may run for a recording: start-up and model loading, plus the recording's own length
-    (transcription runs well faster than real time), within 30 minutes to 3 hours. A stuck job cannot run on."""
-    return int(min(3 * 3600, max(30 * 60, 20 * 60 + (duration or 3600))))
+    """Longest a GPU job may run for a recording, so a stuck job cannot run on: 10 minutes for start-up and model
+    loading, plus a third of the recording's length, within 15 minutes to 1 hour. In Nov 2026 a 12-minute talk took
+    3.5 minutes in all (about 1 to start, then about 6 times faster than real time), so this leaves twice that."""
+    return int(min(3600, max(15 * 60, 10 * 60 + (duration or 3 * 3600) / 3)))
 
 
 def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None) -> Flask:

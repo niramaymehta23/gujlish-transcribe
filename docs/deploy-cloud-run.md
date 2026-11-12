@@ -37,7 +37,6 @@ Visitors are told apart by a signed cookie. Someone who clears their cookies or 
 3. **Install the gcloud CLI** and sign in:
    ```bash
    brew install --cask google-cloud-sdk
-   gcloud components install beta   # the GPU job runs up to 3 hours, a beta Cloud Run feature
    gcloud auth login
    ```
 4. **Hugging Face token.** At [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens), create a token with **read** access. The build uses it to download the models.
@@ -59,7 +58,7 @@ The script builds the image on Google Cloud Build (the first build downloads PyT
 Main Cloud Run settings, all in `deploy/deploy.sh` and `deploy/config.sh`:
 
 - **Website:** 1 CPU, 4 GB memory, **no GPU**, at most one instance, minimum zero. The script checks after every deploy that the website has no GPU, and takes it offline if it does.
-- **GPU job:** one L4 GPU, 4 CPUs, 16 GB memory, one task, no automatic retries. Each run has a time limit from the recording's length (30 minutes to 3 hours), so a stuck job cannot run on.
+- **GPU job:** one L4 GPU, 4 CPUs, 16 GB memory, one task, no automatic retries. Each run has a time limit from the recording's length (15 minutes to 1 hour; a 12-minute talk takes about 3.5 minutes), so a stuck job cannot run on.
 - **One transcription at a time.** Recordings queue on the website and show how many are ahead.
 - **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`, with one copy of each recording: `recordings/.fingerprints.json` keeps each file's SHA-256, and each time an instance starts it merges identical copies and removes leftovers from uploads that never became a run. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
