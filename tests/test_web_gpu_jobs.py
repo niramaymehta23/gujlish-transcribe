@@ -141,9 +141,11 @@ class RunRemoteTest(unittest.TestCase):
         self.assertIsNone(_epoch(None))
 
     def test_time_limits(self):
-        self.assertEqual(gpu_timeout(60), 30 * 60)
-        self.assertEqual(gpu_timeout(3600), 20 * 60 + 3600)
-        self.assertEqual(gpu_timeout(6 * 3600), 3 * 3600)
+        self.assertEqual(gpu_timeout(60), 15 * 60)
+        self.assertEqual(gpu_timeout(716), 15 * 60)  # the 12-minute talk that took 3.5 minutes
+        self.assertEqual(gpu_timeout(3600), 30 * 60)
+        self.assertEqual(gpu_timeout(6 * 3600), 3600)
+        self.assertEqual(gpu_timeout(None), 3600)  # length unknown: the most a job may run
 
 
 class JobEntryPointTest(unittest.TestCase):
