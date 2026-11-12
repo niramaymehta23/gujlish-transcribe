@@ -47,26 +47,33 @@ print(next((c['name'] for c in json.load(sys.stdin).get('notificationChannels', 
 import json, sys
 print(' '.join(p['name'] for p in json.load(sys.stdin).get('alertPolicies', []) if p.get('displayName') == sys.argv[1]))" "$1")
     for name in $existing; do api DELETE "https://monitoring.googleapis.com/v3/$name" >/dev/null; done
-    api POST "$monitoring/alertPolicies" "$(python3 -c "
+    alert_policy "$1" "$2" "$3" "$channel" | api POST "$monitoring/alertPolicies" @- >/dev/null
+  }
+  # The policy is written by Python from a heredoc and piped to curl: macOS's bash 3.2 splits a long quoted Python
+  # program apart when it sits inside "$( )".
+  alert_policy() {
+    python3 - "$@" <<'PY'
 import json, sys
 name, metric_filter, seconds, channel = sys.argv[1:]
 print(json.dumps({
-    'displayName': name,
-    'combiner': 'OR',
-    'notificationChannels': [channel],
-    'documentation': {'content': 'See docs/deploy-cloud-run.md, \"Costs\", for how to check and stop it.'},
-    'conditions': [{
-        'displayName': name,
-        'conditionThreshold': {
-            'filter': metric_filter,
-            'aggregations': [{'alignmentPeriod': '86400s', 'perSeriesAligner': 'ALIGN_SUM',
-                              'crossSeriesReducer': 'REDUCE_SUM'}],
-            'comparison': 'COMPARISON_GT',
-            'thresholdValue': float(seconds),
-            'duration': '0s',
+    "displayName": name,
+    "combiner": "OR",
+    "notificationChannels": [channel],
+    "documentation": {"content": 'See docs/deploy-cloud-run.md, "Costs", for how to check and stop it.',
+                      "mimeType": "text/markdown"},
+    "conditions": [{
+        "displayName": name,
+        "conditionThreshold": {
+            "filter": metric_filter,
+            "aggregations": [{"alignmentPeriod": "86400s", "perSeriesAligner": "ALIGN_SUM",
+                              "crossSeriesReducer": "REDUCE_SUM"}],
+            "comparison": "COMPARISON_GT",
+            "thresholdValue": float(seconds),
+            "duration": "0s",
         },
     }],
-}))" "$1" "$2" "$3" "$channel")" >/dev/null
+}))
+PY
   }
   metric='metric.type="run.googleapis.com/container/billable_instance_time"'
   alert "GPU job ran over ${ALERT_GPU_HOURS_PER_DAY} h today" \
