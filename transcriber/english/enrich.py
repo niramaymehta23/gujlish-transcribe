@@ -156,7 +156,7 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
     if summarize:
         llm = summary_llm_for(args)
         print(f"Summarizing with {llm.describe()}", flush=True)
-        paths = run_summary(
+        summary = run_summary(
             transcript_json,
             llm,
             translation_llm_label=translated_by,
@@ -164,13 +164,13 @@ def run_stages(transcript_json: Path, args, *, translate: bool, summarize: bool,
             reset=getattr(args, "reset", False),
             progress=progress,
         )
-        outputs += [paths["summary_md"], paths["summary_json"]]
+        outputs += [summary["summary_md"], summary["summary_json"]]
         print("Writing the YouTube title and description", flush=True)
         footer, _ = read_text_file(None, "youtube_footer.txt")
-        paths = run_youtube(transcript_json, llm, channel=channel, footer=footer, label=label)
-        outputs += [paths["youtube_md"], paths["youtube_json"]]
+        youtube = run_youtube(transcript_json, llm, channel=channel, footer=footer, label=label)
+        outputs += [youtube["youtube_md"], youtube["youtube_json"]]
         if progress:
-            progress({"stage": "complete", "txt": str(paths["summary_md"]), "json": str(paths["summary_json"])})
+            progress({"stage": "complete", "txt": str(summary["summary_md"]), "json": str(summary["summary_json"])})
     return outputs
 
 

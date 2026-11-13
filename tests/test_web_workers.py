@@ -1,8 +1,10 @@
 """The web app's worker functions: how subprocess output becomes job progress, results and errors."""
 
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -128,6 +130,18 @@ class TestWorkers(unittest.TestCase):
         self.start_translation()
         self.run_task(FakeWorker([], code=0))  # exits cleanly but writes nothing
         self.assertEqual(self.job["translation"]["message"], "Translating stopped. Start it again to resume.")
+
+    def test_a_crashed_stage_names_the_crash_and_logs_its_output(self):
+        self.start_translation()
+        crash = ["Translating with Gemini", "Traceback (most recent call last):", '  File "enrich.py", line 173']
+        crash.append("KeyError: 'summary_md'")
+        log = io.StringIO()
+        with redirect_stdout(log):
+            self.run_task(FakeWorker(crash, code=1))
+        message = "Translating stopped. Start it again to resume. (KeyError: 'summary_md')"
+        self.assertEqual(self.job["translation"], {"status": "error", "progress": None, "message": message})
+        self.assertIn(f"Translating for run {self.job_id} failed (exit code 1)", log.getvalue())
+        self.assertIn("\n  KeyError: 'summary_md'\n", log.getvalue())
 
     def test_summary_stage_checks_the_summary_file(self):
         (self.run_dir / "talk.flex.en.txt").write_text("Today's talk", encoding="utf-8")

@@ -68,6 +68,8 @@ from web.search.gemini import answer as answer_question
 from web.settings import Settings
 
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
+# The last line of a Python traceback: the exception's name, then its message if any ("KeyError: 'summary_md'").
+CRASH_LINE = re.compile(r"(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception|Exit|Interrupt)(?:: .*)?")
 UPLOAD_CHUNK_BYTES = 8 * 1024**2  # Cloud Run caps a request body at 32 MiB, so large files arrive in pieces
 HEX_ID = re.compile(r"[0-9a-f]{32}")
 ACTIVE = {"queued", "loading", "transcribing"}
@@ -181,8 +183,18 @@ def stop_worker(worker) -> None:
 
 
 def last_error(logs: list[str], fallback: str) -> str:
-    """The worker's final "Error: ..." line, or `fallback` when it printed none."""
-    return next((line.removeprefix("Error: ") for line in reversed(logs) if line.startswith("Error:")), fallback)
+    """The worker's final "Error: ..." line. When it printed none, `fallback`, followed by the crash when it crashed
+    (the last line of a Python traceback, such as "KeyError: 'summary_md'")."""
+    for line in reversed(logs):
+        if line.startswith("Error:"):
+            return line.removeprefix("Error: ")
+    crash = next((line for line in reversed(logs) if CRASH_LINE.fullmatch(line)), None)
+    return f"{fallback} ({crash})" if crash else fallback
+
+
+def log_failure(what: str, code: int, logs: list[str]) -> None:
+    """Put a failed worker's last output in the server's log (the site's Cloud Run logs), as the page shows one line."""
+    print(f"{what} failed (exit code {code}). Its last output:", *(f"  {line}" for line in logs), sep="\n", flush=True)
 
 
 def probe_audio(path: Path) -> float | None:
@@ -1154,6 +1166,7 @@ def create_app(
             change(status="paused", message=f"Paused at {stopped_at(job)}. Resume continues from there.")
             update_meta(run_dir, lambda meta: meta.update(paused=True))
         else:
+            log_failure(f"Transcription of run {job_id}", code, logs)
             message = last_error(logs, "Transcription stopped. You can retry to resume completed chunks.")
             change(status="error", message=message)
             update_meta(run_dir, lambda meta: meta.update(failed=message))
@@ -1222,6 +1235,7 @@ def create_app(
         elif not code and key in made:
             set_stage(job, key, status="complete", progress=100, message="Ready")
         else:
+            log_failure(f"{verb} for run {job_id}", code, logs)
             set_stage(job, key, status="error", message=last_error(logs, f"{verb} stopped. Start it again to resume."))
         done = job[key]["status"] == "complete"
         finish_pending(job["run_dir"], {key}, progressed=done)
