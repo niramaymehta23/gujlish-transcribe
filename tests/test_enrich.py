@@ -22,6 +22,7 @@ from transcriber.english.translate import (
     run_translation,
     system_prompt,
 )
+from transcriber.files.storage import stage_paths
 from transcriber.files.textutil import escape_tags, fmt_time, gujarati_ratio, parse_time
 
 GU = [
@@ -402,6 +403,25 @@ class TestSummary(Base):
             self.assertIn(heading, markdown)
         self.assertIn("not found verbatim", markdown)
         self.assertIn("**[00:04]**", markdown)
+
+    def test_the_summary_stage_ends_by_saying_where_the_summary_is(self):
+        # The whole stage as the web app runs it, progress events included: it used to crash after its last file.
+        self.translated()
+        youtube = {"titles": ["A talk on effort"], "description": "About effort.", "tags": ["effort"]}
+        llm = FakeLLM(lambda system, user, n: json.dumps(youtube if "YouTube" in system else self.SUMMARY))
+        llm.describe = lambda: "fake"
+        args = argparse.Namespace(summary_model=None, llm_model=None, label=None, reset=False, channel=None)
+        events = []
+        with (
+            patch("transcriber.english.publish_common.DATA", self.run_dir),
+            patch("transcriber.english.enrich.GeminiLLM", lambda model: llm),
+        ):
+            outputs = run_stages(self.transcript, args, translate=False, summarize=True, progress=events.append)
+        paths = stage_paths(self.transcript)
+        done = {"stage": "complete", "txt": str(paths["summary_md"]), "json": str(paths["summary_json"])}
+        self.assertEqual(events[-1], done)
+        self.assertEqual(outputs, [paths[key] for key in ("summary_md", "summary_json", "youtube_md", "youtube_json")])
+        self.assertIn("## YouTube title\n\nA talk on effort", paths["summary_md"].read_text(encoding="utf-8"))
 
     def test_long_recordings_are_mapped_then_merged(self):
         many = [{"start": i * 10.0, "end": i * 10.0 + 9, "text": "word " * 300} for i in range(14)]
