@@ -185,7 +185,9 @@ class TalkIndex:
         self.model, self.dims = model, dims
         self.lock = threading.RLock()
         self.db = sqlite3.connect(":memory:", check_same_thread=False)
-        weakref.finalize(self, self.db.close)  # an index dropped without close() still frees its database
+        # An index dropped without close() still frees its database, but not at interpreter exit: a search worker may
+        # still be inside SQLite then, and closing the database under it crashes Python. The process frees it anyway.
+        weakref.finalize(self, self.db.close).atexit = False
         self.vectors = VectorTable(dims)
         if not empty:
             self.db.executescript(SCHEMA)

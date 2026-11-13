@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor, FakeWorker, event
+from tests.helpers import DeferredExecutor, FakeWorker, event, stop_search_at_end
 from web.server import RUN_FILE, STOPPED, create_app, run_id
 
 
@@ -38,6 +38,7 @@ class TestRuns(unittest.TestCase):
         """A fresh server on the same storage, as after Cloud Run replaces the machine."""
         self.executor = DeferredExecutor()
         self.app = create_app(executor=self.executor)
+        stop_search_at_end(self, self.app)
         self.client = self.app.test_client()
 
     def meta(self, **fields):

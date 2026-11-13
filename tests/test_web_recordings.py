@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor, wait_for_background_check
+from tests.helpers import DeferredExecutor, stop_search_at_end, wait_for_background_check
 from web.recordings import fingerprint
 from web.server import RUN_FILE, create_app, run_id
 from web.settings import Settings
@@ -34,6 +34,7 @@ class Base(unittest.TestCase):
         app = create_app(executor=self.executor, settings=Settings(**settings))
         app.config["SESSION_COOKIE_SECURE"] = False
         wait_for_background_check(self, app)
+        stop_search_at_end(self, app)
         return app
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import web.server as web_server
-from tests.helpers import DeferredExecutor, wait_for_background_check
+from tests.helpers import DeferredExecutor, stop_search, stop_search_at_end, wait_for_background_check
 from tests.test_web_catalogue import VISITOR, CatalogueBase
 from tests.test_web_gpu_jobs import EXECUTION, FakeJobs
 from transcriber.english.llm import Completion, LLMError
@@ -87,11 +87,14 @@ class SearchBase(CatalogueBase):
         options.update(overrides)
         self.settings = Settings(**options)
         self.executor = DeferredExecutor()
+        if getattr(self, "app", None) is not None:
+            stop_search(self, self.app)  # a restart: the old server is gone
         self.app = create_app(
             executor=self.executor, settings=self.settings, gpu_jobs=gpu_jobs, embedder=embedder, answer_llm=answers
         )
         self.app.config["SESSION_COOKIE_SECURE"] = False
         wait_for_background_check(self, self.app)
+        stop_search_at_end(self, self.app)
         self.search = self.app.extensions["asr_search"]
         self.search.embed_settle = 0  # embed at once rather than after the usual quiet spell
         self.client = self.browser(VISITOR)
@@ -552,15 +555,8 @@ class TestWorker(unittest.TestCase):
             stamp=self.talks.stamp, embedder=embedder, meaning=lambda: embedder is not None, trusted=trusted,
         )  # fmt: skip
         service.embed_settle = 0
-        self.addCleanup(self.stop, service)
+        self.addCleanup(lambda: self.assertTrue(service.stop()))
         return service
-
-    def stop(self, service):
-        with service.cond:
-            service.pending.clear()
-            service.checks.clear()
-            service.dirty_since, service.unembedded = None, False
-            service.cond.notify_all()
 
     def until(self, check, timeout=3.0):
         deadline = time.monotonic() + timeout

@@ -125,7 +125,8 @@ class SearchService:
         self.index: TalkIndex | None = None  # None until restored or built
         self.cond = threading.Condition()
         self.save_lock = threading.Lock()
-        self.started = self.running = False
+        self.started = self.running = self.stopped = False
+        self.worker: threading.Thread | None = None  # the latest worker thread
         self.pending: dict[str, str] = {}  # talk -> "touch", "rename" or "forget", oldest first
         self.generations: dict[str, int] = {}  # raised by touch and forget: a read begun before is not used
         self.tries: dict[str, int] = {}
@@ -174,14 +175,32 @@ class SearchService:
             self._wake()
 
     def _wake(self) -> None:
-        """Start the worker if it is not running (the caller holds cond)."""
-        if not self.started:
+        """Start the worker if it is not running (the caller holds cond). Never after stop()."""
+        if not self.started or self.stopped:
             return
         if self.running:
             self.cond.notify_all()
             return
         self.running = True
-        threading.Thread(target=self._work, daemon=True, name="vaani-search").start()
+        self.worker = threading.Thread(target=self._work, daemon=True, name="vaani-search")
+        self.worker.start()
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        """End the worker once its current task is done, then close the index. Nothing starts a worker afterwards.
+        False, with the index left open, when the worker is still busy after `timeout` seconds."""
+        with self.cond:
+            self.stopped = True
+            self.cond.notify_all()
+            worker = self.worker
+        if worker is not None:
+            worker.join(timeout)
+            if worker.is_alive():
+                return False
+        with self.cond:
+            index, self.index = self.index, None
+        if index is not None:
+            index.close()
+        return True
 
     # ----- the worker -----
 
@@ -211,6 +230,8 @@ class SearchService:
     def _choose(self):
         """The next task and None, or None and how long to wait, or (None, None) when there is nothing left to do.
         The caller holds cond."""
+        if self.stopped:
+            return None, None
         now = time.monotonic()
         if self.index is None:
             return (self._load, None) if now >= self.load_after else (None, self.load_after - now)
@@ -540,13 +561,15 @@ class SearchService:
         return index.context(question, vector, limit=limit, per_talk=per_talk)
 
     def wait_idle(self, timeout: float = 10.0, vectors: bool = True) -> bool:
-        """Wait until every queued change is indexed (and, with `vectors`, embedded while meaning search is on)."""
+        """Wait until every queued change is indexed (and, with `vectors`, embedded while meaning search is on). After
+        stop() nothing more is indexed, so it waits only for a task still running."""
         deadline = time.monotonic() + timeout
         with self.cond:
             while True:
                 due = vectors and self.unembedded and self.meaning_on() and time.monotonic() >= self._embed_due()
                 loading = self.started and self.index is None
-                if not (loading or self.pending or self.busy or self.checks or due):
+                queued = not self.stopped and (loading or self.pending or self.checks or due)
+                if not (queued or self.busy):
                     return True
                 left = deadline - time.monotonic()
                 if left <= 0:

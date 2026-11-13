@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor, FakeWorker, event
+from tests.helpers import DeferredExecutor, FakeWorker, event, stop_search_at_end
 from web.server import create_app
 
 
@@ -30,6 +30,7 @@ class TestWorkers(unittest.TestCase):
         self.addCleanup(env.stop)
         self.executor = DeferredExecutor()
         self.app = create_app(executor=self.executor)
+        stop_search_at_end(self, self.app)
         self.client = self.app.test_client()
         self.job_id = self.client.get("/api/history").json[0]["id"]
         self.job = self.app.extensions["asr_jobs"][self.job_id]

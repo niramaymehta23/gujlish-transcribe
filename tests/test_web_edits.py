@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, stop_search_at_end
 from transcriber.speech import align
 from web.server import create_app
 
@@ -41,6 +41,7 @@ class TestEdits(unittest.TestCase):
         self.dictionary = root / "dictionary.json"
         self.executor = DeferredExecutor()
         self.app = create_app(executor=self.executor)
+        stop_search_at_end(self, self.app)
         self.client = self.app.test_client()
         self.job_id = self.client.get("/api/history").json[0]["id"]
 

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from docx import Document
 
 from scripts.evaluate import error_rate, normalize
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, stop_search_at_end
 from transcriber.english.captions import english_key
 from web.server import create_app, markdown_docx
 
@@ -46,6 +46,7 @@ class TestStages(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.app = create_app(executor=self.executor)
+        stop_search_at_end(self, self.app)
         self.client = self.app.test_client()
         self.job_id = self.client.get("/api/history").json[0]["id"]
 

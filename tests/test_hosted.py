@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor, wait_for_background_check
+from tests.helpers import DeferredExecutor, stop_search_at_end, wait_for_background_check
 from web.server import create_app
 from web.settings import Settings
 
@@ -51,6 +51,7 @@ class HostedBase(unittest.TestCase):
         app = create_app(executor=self.executor, settings=Settings(**options))
         app.config["SESSION_COOKIE_SECURE"] = False  # the test client uses plain http
         wait_for_background_check(self, app)
+        stop_search_at_end(self, app)
         return app
 
     def upload(self, client, data: bytes, piece: int = 2 * 1024**2) -> str:

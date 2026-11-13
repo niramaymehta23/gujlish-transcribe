@@ -19,7 +19,13 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor, background_check_done, wait_for_background_check
+from tests.helpers import (
+    DeferredExecutor,
+    background_check_done,
+    stop_search,
+    stop_search_at_end,
+    wait_for_background_check,
+)
 from tests.test_web_gpu_jobs import EXECUTION, FakeJobs
 from transcriber.english.captions import english_key
 from web.server import CATALOGUE_FILE, CATALOGUE_VERSION, RUN_FILE, ViewCache, create_app
@@ -134,6 +140,7 @@ class CatalogueBase(unittest.TestCase):
         self.app = create_app(executor=self.executor, settings=self.settings, gpu_jobs=gpu_jobs)
         self.app.config["SESSION_COOKIE_SECURE"] = False  # the test client uses plain http
         wait_for_background_check(self, self.app)
+        stop_search_at_end(self, self.app)
         self.client = self.browser(VISITOR)
         return self.app
 
@@ -228,6 +235,7 @@ class CatalogueBase(unittest.TestCase):
             return self.open(job_id, self.browser(VISITOR, other))
         finally:
             self.join_reconcile(other)
+            stop_search(self, other)
 
     def saved_runs(self) -> list[dict]:
         data = json.loads(self.catalogue.read_text(encoding="utf-8"))

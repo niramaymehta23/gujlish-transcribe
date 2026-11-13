@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, stop_search_at_end
 from web import usage
 from web.cloudjobs import RemoteRun, events_file, run_remote
 from web.server import RUN_FILE, create_app, gpu_timeout
@@ -191,6 +191,7 @@ class ServerGpuJobTest(unittest.TestCase):
     def start_server(self, cap=10):
         self.executor = DeferredExecutor()
         self.app = create_app(executor=self.executor, settings=Settings(gpu_hours_per_month=cap), gpu_jobs=self.jobs)
+        stop_search_at_end(self, self.app)
         self.client = self.app.test_client()
 
     def meta(self, **fields):
@@ -289,6 +290,7 @@ class ServerGpuJobTest(unittest.TestCase):
 
     def test_local_sites_have_no_gpu_job(self):
         app = create_app(executor=DeferredExecutor(), settings=Settings())
+        stop_search_at_end(self, app)
         self.assertEqual(app.test_client().get("/api/usage").json, {"gpu": False})
 
     def test_a_gpu_job_is_used_only_on_cloud_run(self):

@@ -60,6 +60,18 @@ def background_check_done(app, timeout: float = 10) -> bool:
     return thread is None or not thread.is_alive()
 
 
+def stop_search(test, app) -> None:
+    """Stop the site's search worker. One left running outlives its test and later reads wherever
+    storage.TRANSCRIPTS then points (the real data folder once a test's patch is undone)."""
+    test.assertTrue(app.extensions["asr_search"].stop(), "the search worker is still busy")
+
+
+def stop_search_at_end(test, app) -> None:
+    """Have `test` stop the site's search worker when it ends. Cleanups run last first, so this runs before the
+    patches and temporary storage set up earlier are undone."""
+    test.addCleanup(stop_search, test, app)
+
+
 def wait_for_background_check(test, app) -> None:
     """Have `test` wait for the app's background check before the storage made earlier in setUp is removed."""
     test.addCleanup(

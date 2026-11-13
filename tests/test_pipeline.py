@@ -5,13 +5,14 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from scripts.evaluate import error_rate
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, stop_search
 from transcriber.files.storage import new_run, run_paths
 from transcriber.speech.cli import _decode_chunk, build_parser, run
 from transcriber.speech.postprocess import drop_cut_stop, drop_cut_stops, merge_segments
@@ -204,8 +205,10 @@ class TestWorkflow(unittest.TestCase):
         with (
             patch("transcriber.files.storage.RECORDINGS", self.root / "recordings"),
             patch("transcriber.files.storage.TRANSCRIPTS", self.root / "transcripts"),
+            ExitStack() as stack,  # left first: the search worker stops before the patches end
         ):
             app = create_app(executor=executor)
+            stack.callback(stop_search, self, app)
             client = app.test_client()
             self.assertEqual(client.get("/").status_code, 200)
             self.assertEqual(client.post("/api/jobs", data={}).status_code, 400)
@@ -274,8 +277,10 @@ class TestWorkflow(unittest.TestCase):
                 json.dumps({"source": f"{name}.wav", "model": "flex", "mode": "mixed", "duration": 3.0}),
                 encoding="utf-8",
             )
-        with patch("transcriber.files.storage.TRANSCRIPTS", root):
-            client = create_app(executor=DeferredExecutor()).test_client()
+        with patch("transcriber.files.storage.TRANSCRIPTS", root), ExitStack() as stack:
+            app = create_app(executor=DeferredExecutor())
+            stack.callback(stop_search, self, app)
+            client = app.test_client()
             history = client.get("/api/history").json
             self.assertEqual([entry["name"] for entry in history], ["a_new.wav", "z_old.wav"])
             self.assertEqual(client.get(f"/api/jobs/{history[0]['id']}").json["text"], "ગુજરાતી")
