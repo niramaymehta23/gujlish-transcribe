@@ -1,4 +1,4 @@
-"""Hosted mode: password, per-visitor privacy, limits, chunked uploads and retention."""
+"""Hosted mode: password, limits, chunked uploads and retention. Sharing and signing out: tests/test_web_talks.py."""
 
 import subprocess
 import tempfile
@@ -99,7 +99,7 @@ class TestPassword(HostedBase):
         self.assertEqual(client.get("/login").status_code, 302)
 
 
-class TestUploadsAndPrivacy(HostedBase):
+class TestUploads(HostedBase):
     def test_chunked_upload_rebuilds_the_file(self):
         app = self.app()
         response = self.start_job(app.test_client())
@@ -107,7 +107,7 @@ class TestUploadsAndPrivacy(HostedBase):
         job = app.extensions["asr_jobs"][response.json["id"]]
         saved = self.root / "recordings" / "talk.wav"
         self.assertEqual(saved.read_bytes(), self.source.read_bytes())
-        self.assertEqual(Path(job["run_dir"], ".owner").exists(), True)
+        self.assertFalse(Path(job["run_dir"], ".owner").exists())  # talks belong to no one browser
         self.assertEqual(list((self.root / "tmp" / "vaani-uploads").glob("*")), [])
 
     def test_out_of_order_and_oversized_pieces(self):
@@ -122,25 +122,6 @@ class TestUploadsAndPrivacy(HostedBase):
         upload_id = client.post("/api/uploads").json["id"]
         self.assertEqual(other.put(f"/api/uploads/{upload_id}?offset=0", data=b"a").status_code, 404)
 
-    def test_visitors_see_only_their_own_runs(self):
-        app = self.app()
-        owner, stranger = app.test_client(), app.test_client()
-        job_id = self.start_job(owner).json["id"]
-        job = app.extensions["asr_jobs"][job_id]
-        txt = Path(job["run_dir"]) / "talk.flex.txt"
-        txt.write_text("આજે machine learning\n", encoding="utf-8")
-        (txt.with_suffix(".json")).write_text(
-            '{"source": "talk.wav", "model": "flex", "mode": "mixed", "duration": 12, "segments": []}', encoding="utf-8"
-        )
-        job.update(status="complete", txt=str(txt), json=str(txt.with_suffix(".json")))
-        self.assertEqual(owner.get(f"/api/jobs/{job_id}").status_code, 200)
-        self.assertNotIn("owner", owner.get(f"/api/jobs/{job_id}").json)
-        for path in (f"/api/jobs/{job_id}", f"/api/jobs/{job_id}/download/txt"):
-            self.assertEqual(stranger.get(path).status_code, 404)
-        self.assertEqual(stranger.post(f"/api/jobs/{job_id}/retry").status_code, 404)
-        self.assertEqual(len(owner.get("/api/history").json), 1)
-        self.assertEqual(stranger.get("/api/history").json, [])
-
     def test_limits(self):
         client = self.app(max_minutes=0.1).test_client()  # 6 seconds
         response = self.start_job(client)
@@ -150,7 +131,7 @@ class TestUploadsAndPrivacy(HostedBase):
         client = self.app(models=("gujlish",)).test_client()
         self.assertEqual(self.start_job(client, model="flex").status_code, 400)
         self.assertEqual(self.start_job(client, model="gujlish").status_code, 202)
-        self.assertEqual(self.start_job(client, model="gujlish").status_code, 429)  # one active run per visitor
+        self.assertEqual(client.post("/api/uploads").status_code, 429)  # one active run on the site
         page = client.get("/").get_data(as_text=True)
         self.assertNotIn('value="flex"', page)
         self.assertNotIn("Bodhan", page)
@@ -190,6 +171,7 @@ class TestRetentionAndPage(HostedBase):
         self.assertIn("Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat.", page)
         self.assertIn("deleted after 24 hours", page)
         self.assertNotIn("Processed on this computer", page)
+        self.assertIn("Anyone who opens this site sees the same recordings and results", page)  # no password here
 
 
 if __name__ == "__main__":

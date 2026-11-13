@@ -30,11 +30,13 @@ from threading import Lock, Thread
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, abort, g, jsonify, redirect, render_template, request, send_file, session, url_for
 
 import transcriber.files.storage as storage
 from transcriber.english.captions import captions_current, captions_srt
 from transcriber.english.llm import gemini_available
+from transcriber.english.summarize import UNTITLED
+from transcriber.english.youtube import shorten
 from transcriber.files.storage import ROOT, new_run, run_paths, stage_paths
 from transcriber.files.subtitles import to_srt
 from transcriber.files.textutil import fmt_time, write_json
@@ -67,7 +69,6 @@ UPLOAD_CHUNK_BYTES = 8 * 1024**2  # Cloud Run caps a request body at 32 MiB, so 
 HEX_ID = re.compile(r"[0-9a-f]{32}")
 ACTIVE = {"queued", "loading", "transcribing"}
 SWEEP_EVERY_SECONDS = 600
-OWNER_FILE = ".owner"
 RUN_FILE = ".run.json"  # the recording, its settings, and the steps still to finish
 MAX_RESUMES = 3  # restarts in a row after which cut-short work waits for you instead of resuming itself
 STOP_GRACE_SECONDS = 10  # a stopped worker is killed if it is still running after this
@@ -76,10 +77,12 @@ ROUGH_PAD = 1.0  # and around words whose times are estimated
 LEFTOVER_SECONDS = 3600  # unused recordings and empty run folders younger than this may belong to an upload under way
 EVENT_PREFIX = "ASR_EVENT "
 CATALOGUE_FILE = ".catalogue.json"  # every run, in the transcripts folder (create_app's catalogue)
-CATALOGUE_VERSION = 1  # a catalogue file of any other version is rebuilt from the run folders
+# A catalogue file of any other version is rebuilt from the run folders. Version 2 added the talks' names.
+CATALOGUE_VERSION = 2
 # What the catalogue keeps of each run as it is, besides its paths and the fields catalogue_entry() adds.
 CATALOGUE_FIELDS = ("name", "model", "mode", "status", "progress", "message", "duration", "processed", "size")
-CATALOGUE_FIELDS += ("sha256", "owner", "started")
+CATALOGUE_FIELDS += ("sha256", "started")
+TITLE_LIMIT = 120  # characters in a talk's name
 # Characters of finished talks' files kept in memory; parsed, they take about twice that in bytes (Nov 2026 talks).
 VIEW_CACHE_CHARS = 64 * 1024**2
 STOPPED = "Stopped. Start it again to continue where it left off."
@@ -87,6 +90,9 @@ GPU_LIMIT_MESSAGE = (
     "This month's GPU limit ({hours:g} hours) is used up, so no new transcriptions can start. "
     "It resets on the 1st (UTC), or the site owner can raise it."
 )
+BUSY_MESSAGE = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
+# Direction overrides and isolates: in a name they would turn the text shown after it around.
+BIDI_CONTROLS = frozenset("‪‫‬‭‮⁦⁧⁨⁩")
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,46 @@ def clean_filename(name: str) -> str:
     return "".join(
         char if char in " .()-_" or unicodedata.category(char)[0] in "LNM" else "_" for char in raw_name
     ).strip(" .")[:180]
+
+
+def clean_title(text: str) -> str:
+    """A talk's name as it is kept, shown and searched: NFC, control characters and lone surrogates as spaces, no
+    direction overrides, single spaces, and empty when nothing in it shows. Joiners and other format characters stay,
+    as Gujarati spelling needs them."""
+    text = unicodedata.normalize("NFC", text)
+    kept = "".join(
+        " " if unicodedata.category(char) in {"Cc", "Cs"} else "" if char in BIDI_CONTROLS else char for char in text
+    )
+    if not any(unicodedata.category(char)[0] in "LNPS" for char in kept):  # only spaces, joiners or marks
+        return ""
+    return " ".join(kept.split())
+
+
+def summary_title(transcript_json) -> str | None:
+    """The short title the Gemini summary gave the talk (transcriber.english.summarize), as a name for it: None when
+    there is no summary, it can't be read, or the model gave no title."""
+    try:
+        data = json.loads(stage_paths(Path(transcript_json))["summary_json"].read_text(encoding="utf-8"))
+        title = clean_title(data["summary"]["title"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return shorten(title, TITLE_LIMIT) if title and title != UNTITLED else None
+
+
+def given_title(meta: dict) -> str | None:
+    """The name you gave a run, from its RUN_FILE."""
+    title = meta.get("title")
+    return title if isinstance(title, str) and title else None
+
+
+def shown_title(job: dict) -> tuple[str | None, str | None]:
+    """The name a talk shows and where it came from: the one you gave it ("user"), else its summary's ("summary").
+    With neither, (None, None): the page shows the file name."""
+    if job.get("title"):
+        return job["title"], "user"
+    if job.get("auto_title"):
+        return job["auto_title"], "summary"
+    return None, None
 
 
 def run_id(run_dir: Path) -> str:
@@ -452,6 +498,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     tasks = {}  # (job id, step) -> the queued task allowed to run it; stopping or queueing again changes it
     stopping = {}  # (job id, step) -> why its process is being stopped: "pause", "stop" or "delete"
     deleted = set()  # run folders being removed in the background
+    claims = set()  # requests let through to start a transcription on a hosted site, until they end (take_the_place)
     uploads_dir = Path(tempfile.gettempdir()) / "vaani-uploads"  # local disk, not the mounted bucket
     last_sweep = [0.0]
     sequence = [0]
@@ -495,17 +542,13 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             except OSError:
                 pass  # the job's own record stays
 
-    def owner_tag() -> str:
-        """A per-browser id kept in the signed session cookie; hosted runs are visible only to their owner."""
+    def browser_tag() -> str:
+        """A per-browser id kept in the signed session cookie, so that only the browser sending a recording in pieces
+        can add to it. Talks themselves are everyone's: on a site with a password, being signed in is the account."""
         if "visitor" not in session:
             session.permanent = True
             session["visitor"] = uuid4().hex
         return hashlib.sha256(session["visitor"].encode()).hexdigest()[:32]
-
-    def visible(job: dict) -> bool:
-        """Whether this browser may list and open the run: on a hosted site, only the runs it started. Every listing
-        and lookup asks here, so this is the one place that filter lives."""
-        return not settings.hosted or job.get("owner") == owner_tag()
 
     def run_dirs(root: Path | None = None) -> list[Path]:
         """transcripts/<recording>/<model>/<run>/ folders. Listed level by level, so one deleted in the meantime is
@@ -525,13 +568,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     def load_run(run_dir: Path) -> dict | None:
         """A job record rebuilt from a run folder: finished, paused, or cut short by a restart."""
         meta = read_meta(run_dir)
-        owner = run_dir / OWNER_FILE
-        record = {
-            "id": run_id(run_dir),
-            "run_dir": str(run_dir),
-            "owner": owner.read_text(encoding="utf-8") if settings.hosted and owner.exists() else None,
-            "started": started(run_dir),
-        }
+        record = {"id": run_id(run_dir), "run_dir": str(run_dir), "started": started(run_dir)}
         try:
             transcript = find_transcript(run_dir, meta)
             if transcript:
@@ -563,6 +600,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         record["size"] = meta.get("size") or (recording.stat().st_size if recording.is_file() else None)
         if trusted:
             record.update(done=outputs(record.get("json")), unsettled=unsettled(meta, record["status"]))
+        # Its names: the one you gave it, from RUN_FILE, and its summary's (read only when there is a summary).
+        summarised = "summary" in record["done"] if trusted else bool(record.get("json"))
+        record.update(title=given_title(meta), auto_title=summary_title(record["json"]) if summarised else None)
         return record
 
     def restore(job_id: str) -> dict | None:
@@ -579,9 +619,10 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         return None
 
     def find_job(job_id: str) -> dict:
-        """The job dict (the caller holds the lock), or 404 for an unknown run or someone else's."""
+        """The job dict (the caller holds the lock), or 404 for an unknown run. Everyone who may use the site may open
+        every run (guard_requests)."""
         job = jobs.get(job_id) or (restore(job_id) if HEX_ID.fullmatch(job_id) else None)
-        if not job or not visible(job):
+        if not job:
             abort(404)
         return job
 
@@ -605,24 +646,42 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             found.append(job)
         return found
 
-    def update_meta(run_dir, change) -> None:
-        """Read the run's RUN_FILE, let `change` edit it, write it back. Skipped once the run is being deleted. When
-        trusted, the catalogue's note of whether a restart must look at the run follows the file."""
-        flipped = False
+    def update_meta(run_dir, change) -> bool:
+        """Read the run's RUN_FILE, let `change` edit it, write it back; False when skipped because the run is being
+        deleted, its folder is gone, or its RUN_FILE is there but can't be read just now (written back from nothing,
+        it would lose the run's recording, model and pending work). The run's record follows the file (follow_meta),
+        and the catalogue is saved when that changed it."""
         with meta_lock:
             if str(run_dir) in deleted or not Path(run_dir).is_dir():
-                return
-            meta = read_meta(run_dir)
+                return False
+            try:
+                meta = json.loads((Path(run_dir) / RUN_FILE).read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                meta = {}  # a run from before RUN_FILE
+            except (OSError, ValueError):
+                return False
+            if not isinstance(meta, dict):
+                return False
             change(meta)
             write_json(Path(run_dir) / RUN_FILE, meta)
-            if trusted:
-                with lock:
-                    job = jobs.get(run_id(run_dir))
-                    if job is not None:
-                        now = unsettled(meta, job.get("status"))
-                        flipped, job["unsettled"] = job.get("unsettled") != now, now
-        if flipped:
+            changed = follow_meta(run_dir, meta)
+        if changed:
             save_catalogue()
+        return True
+
+    def follow_meta(run_dir, meta: dict) -> bool:
+        """Bring the run's record in line with its RUN_FILE, as just read or written (the caller holds meta_lock, so
+        no other change of the file comes in between): the name you gave it and, when trusted, whether a restart
+        must look at it. True when the catalogue changed."""
+        with lock:
+            job = jobs.get(run_id(run_dir))
+            if job is None:
+                return False
+            before = (job.get("title"), job.get("unsettled"))
+            job["title"] = given_title(meta)
+            if trusted:
+                job["unsettled"] = unsettled(meta, job.get("status"))
+            return trusted and (job.get("title"), job.get("unsettled")) != before
 
     def save_catalogue() -> None:
         """Write the catalogue file (trusted only). A save asked for while another is being written is left to that
@@ -672,7 +731,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             json=relative(job.get("json"), run_dir),
             done=list(job.get("done", ())),
             unsettled=bool(job.get("unsettled", True)) or job.get("status") in ACTIVE,
-            title=job.get("title"),  # for naming talks; not shown yet
+            # Its names, as plain NFC text for search: the one you gave it (also in RUN_FILE) and its summary's.
+            title=job.get("title"),
+            auto_title=job.get("auto_title"),
         )
         return entry
 
@@ -682,9 +743,12 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             raise ValueError("a run without a folder or a status")
         if entry["status"] == "complete" and not (entry.get("txt") and entry.get("json")):
             raise ValueError("a finished run without its transcript")
+        if any(not isinstance(entry.get(key), (str, type(None))) for key in ("title", "auto_title")):
+            raise ValueError("a name that is not text")
         run_dir = transcripts / entry["run"]
         record = {key: entry[key] for key in CATALOGUE_FIELDS if key in entry}
-        record.update(id=run_id(run_dir), run_dir=str(run_dir), title=entry.get("title"))
+        record.update(id=run_id(run_dir), run_dir=str(run_dir), title=entry.get("title") or None)
+        record["auto_title"] = entry.get("auto_title") or None
         record["done"] = tuple(key for key in entry["done"] if key in STAGES)
         record["unsettled"] = bool(entry["unsettled"]) or entry["status"] in ACTIVE  # cut short if it was running
         for key, base in (("source", storage.RECORDINGS), ("txt", run_dir), ("json", run_dir)):
@@ -706,10 +770,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             return False
         for record in records:
             if record["unsettled"]:
-                fresh = load_run(Path(record["run_dir"]))
-                if fresh is None:
+                record = load_run(Path(record["run_dir"]))
+                if record is None:
                     continue  # its folder is gone or unreadable; reconcile() adds it back if it is there after all
-                record = {**fresh, "title": record["title"]}
             with lock:
                 jobs.setdefault(record["id"], record)
         return True
@@ -764,15 +827,22 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         save_catalogue()
 
     def refresh(job: dict, run_dir: Path) -> None:
-        """Take in what changed in a known run's folder without this server: which stage outputs it has, and work its
-        RUN_FILE says a restart should pick up. A run with work under way is left alone."""
+        """Take in what changed in a known run's folder without this server: the name you gave it, which stage outputs
+        it has (and so its summary's name), and work its RUN_FILE says a restart should pick up. A run with work under
+        way is left alone."""
         with lock:
             if jobs.get(job["id"]) is not job or job["status"] in ACTIVE or busy(job, *STAGES):
                 return
             settled = not job.get("unsettled")
+        with meta_lock:  # so a rename made meanwhile is not undone by the name read before it
+            meta = read_meta(run_dir)
+            if meta:  # else unreadable for now: keep what the catalogue knows
+                with lock:
+                    job["title"] = given_title(meta)
         if job["status"] == "complete" and note_outputs(job)[1]:
             views.forget(job["run_dir"])
-        if settled and unsettled(read_meta(run_dir), job["status"]):
+            name_from_summary(job)
+        if settled and unsettled(meta, job["status"]):
             with lock:
                 job["unsettled"] = True
             resume_run(run_dir)
@@ -805,6 +875,13 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         made = note_outputs(job)[0]
         views.forget(job["run_dir"])
         return made
+
+    def name_from_summary(job: dict) -> None:
+        """Take the talk's name from its summary, after the summary changed. Only its summary's name: the one you gave
+        it is kept apart (in RUN_FILE) and shows first, so this never replaces it."""
+        title = summary_title(job["json"]) if job.get("json") and output_exists(job, "summary") else None
+        with lock:
+            job["auto_title"] = title
 
     def drop_meta(run_dir, *keys):
         update_meta(run_dir, lambda meta: [meta.pop(key, None) for key in keys])
@@ -1006,6 +1083,11 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             shutil.rmtree(job["run_dir"], ignore_errors=True)
             return False
         made = took_in(job)  # however it ended, it may have written files
+        if key == "summary":
+            # Named from the summary on disk, however the stage ended: the summary is written before the YouTube
+            # details, so it may be new even when those failed or were stopped. Before it shows, so no page sees it
+            # without its name.
+            name_from_summary(job)
         if reason == "stop":
             set_stage(job, key, status="idle", progress=None, message=STOPPED)
         elif not code and key in made:
@@ -1213,12 +1295,18 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             error = "That password is not right."
         return render_template("login.html", error=error), 401 if error else 200
 
+    @app.post("/logout")
+    def logout():
+        """Sign this browser out: the whole session goes, so the site asks for the password again."""
+        session.clear()
+        return redirect(url_for("login"))
+
     @app.get("/")
     def index():
-        owner_tag()
         return render_template(
             "index.html",
             hosted=settings.hosted,
+            has_password=bool(settings.password),
             models=settings.models,
             max_upload_mb=round(settings.max_upload_mb),
             upload_limit=f"{settings.max_upload_mb / 1024:g} GB"
@@ -1229,13 +1317,44 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             chunk_bytes=UPLOAD_CHUNK_BYTES,
         )
 
+    def site_busy() -> bool:
+        """Whether a recording is being transcribed or waits to be, or a request let through is about to add one.
+        The caller holds lock."""
+        return bool(claims) or any(job["status"] in ACTIVE for job in jobs.values())
+
+    def take_the_place() -> bool:
+        """On a hosted site one recording is transcribed or waits to be at a time, whichever browser started it: False
+        while one is. A request let through holds the site's place until it ends (free_place), by when it has queued
+        its run or given up, so two requests at once are never both let through. Work a restart picks up again is
+        not asked here."""
+        if not settings.hosted:
+            return True
+        with lock:
+            if site_busy():
+                return False
+            g.claim = object()
+            claims.add(g.claim)
+        return True
+
+    @app.teardown_request
+    def free_place(_error=None):
+        claim = g.pop("claim", None)
+        if claim is not None:
+            with lock:
+                claims.discard(claim)
+
     def upload_path(upload_id: str) -> Path:
         if not HEX_ID.fullmatch(upload_id):
             abort(404)
-        return uploads_dir / f"{owner_tag()}-{upload_id}.part"
+        return uploads_dir / f"{browser_tag()}-{upload_id}.part"
 
     @app.post("/api/uploads")
     def start_upload():
+        if settings.hosted:  # said before the file is sent, not after
+            with lock:
+                busy = site_busy()
+            if busy:
+                return jsonify(error=BUSY_MESSAGE), 429
         uploads_dir.mkdir(parents=True, exist_ok=True)
         upload_id = uuid4().hex
         upload_path(upload_id).write_bytes(b"")
@@ -1295,37 +1414,41 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
 
     @app.get("/api/recordings/<sha>")
     def recording_status(sha):
-        """Whether this audio is stored already (so it need not be uploaded), and your runs of it."""
+        """Whether this audio is stored already (so it need not be uploaded), and the runs of it."""
         stored = find_recording(sha) if FINGERPRINT.fullmatch(sha) else None
         runs = []
         for job in all_runs():
             with lock:
-                if visible(job) and stored and (job.get("sha256") == sha or job.get("source") == str(stored)):
+                if stored and (job.get("sha256") == sha or job.get("source") == str(stored)):
                     runs.append({key: job.get(key) for key in ("id", "name", "started", "status")})
+                    runs[-1]["title"] = shown_title(job)[0]
         return jsonify(stored=stored is not None, runs=runs)
 
     @app.post("/api/jobs")
     def create_job():
         sweep()
         model, mode = request.form.get("model", settings.models[0]), request.form.get("mode", "mixed")
-        if model not in settings.models or mode not in {"mixed", "native"}:
-            return jsonify(error="Choose a valid model and output mode."), 400
         upload, upload_id = request.files.get("audio"), request.form.get("upload_id")
+
+        def refuse(message, status=400):
+            """Turn the request down, removing the file it sent in pieces: to try again, the browser sends it again."""
+            if upload_id and not upload and HEX_ID.fullmatch(upload_id):
+                upload_path(upload_id).unlink(missing_ok=True)
+            return jsonify(error=message), status
+
         known = request.form.get("fingerprint", "")  # a recording already stored: nothing was uploaded
         name = upload.filename if upload else request.form.get("name", "")
+        if model not in settings.models or mode not in {"mixed", "native"}:
+            return refuse("Choose a valid model and output mode.")
         if not (upload or upload_id or known) or not name:
-            return jsonify(error="Choose an audio file first."), 400
+            return refuse("Choose an audio file first.")
         filename = clean_filename(name)
         if not filename:
-            return jsonify(error="Choose a file with a valid filename."), 400
-        owner = owner_tag()
+            return refuse("Choose a file with a valid filename.")
         if gpu_limit_reached():
-            return jsonify(error=GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month)), 429
-        if settings.hosted:
-            with lock:
-                if any(job.get("owner") == owner and job["status"] in ACTIVE for job in jobs.values()):
-                    message = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
-                    return jsonify(error=message), 429
+            return refuse(GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month), 429)
+        if not take_the_place():
+            return refuse(BUSY_MESSAGE, 429)
         partial = upload_path(upload_id) if upload_id and not upload else None
         if partial is not None and not partial.exists():
             return jsonify(error="The upload did not finish. Please try again."), 400
@@ -1345,8 +1468,6 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 source.unlink(missing_ok=True)
             return jsonify(error=str(error)), 400
         run_dir = new_run(source, model, mode)
-        if settings.hosted:
-            (run_dir / OWNER_FILE).write_text(owner, encoding="utf-8")
         size = source.stat().st_size
         meta = {"source": source.name, "name": filename, "model": model, "mode": mode, "duration": duration}
         write_json(run_dir / RUN_FILE, {**meta, "size": size, "sha256": sha})
@@ -1365,12 +1486,13 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 "message": "Queued for transcription",
                 "source": str(source),
                 "run_dir": str(run_dir),
-                "owner": owner,
                 "size": size,
                 "started": started(run_dir),
+                "title": None,
+                "auto_title": None,
             }
             if trusted:
-                jobs[job_id].update(done=(), unsettled=True, title=None)
+                jobs[job_id].update(done=(), unsettled=True)
         save_catalogue()
         queue_transcription(job_id, "Queued for transcription")
         return jsonify(id=job_id), 202
@@ -1384,9 +1506,10 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     1 for other in jobs.values() if other["status"] in ACTIVE and other.get("seq", 0) < job["seq"]
                 )
         # The catalogue's own fields stay on the server, so the page sees the same fields as before it existed.
-        hidden = {"source", "run_dir", "txt", "json", "owner", "seq", "done", "unsettled", "title", *STAGES}
+        hidden = {"source", "run_dir", "txt", "json", "seq", "done", "unsettled", "auto_title", *STAGES}
         result = {k: v for k, v in job.items() if k not in hidden}
         result["run"] = Path(job["run_dir"]).name
+        result["title"], result["title_from"] = shown_title(job)
         for key in STAGES:
             result[key] = stage_view(job, key)
         if result["status"] == "complete":
@@ -1534,6 +1657,8 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 return jsonify(error="Only a paused or stopped recording can be resumed."), 409
         if gpu_limit_reached():
             return jsonify(error=GPU_LIMIT_MESSAGE.format(hours=settings.gpu_hours_per_month)), 429
+        if not take_the_place():
+            return jsonify(error=BUSY_MESSAGE), 429
         drop_meta(job["run_dir"], "paused", "failed", "resumes")
         queue_transcription(job_id, "Queued to continue from where it stopped")
         return jsonify(id=job_id), 202
@@ -1560,7 +1685,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     def delete_job(job_id):
         """Cancel or delete a run: stop whatever it is doing, then remove its files in the background."""
         running = []
-        with lock:
+        # meta_lock too, so no RUN_FILE write (a rename, say) is under way as the folder goes: one that ended after the
+        # removal began could leave the file behind, and a restart would find the talk again.
+        with meta_lock, lock:
             job = find_job(job_id)
             del jobs[job_id]
             deleted.add(job["run_dir"])
@@ -1577,6 +1704,35 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         save_catalogue()
         Thread(target=remove_run, args=(job, running), daemon=True).start()
         return jsonify(deleted=True)
+
+    @app.post("/api/jobs/<job_id>/rename")
+    def rename_job(job_id):
+        """Give the talk a name every device shows, kept in its RUN_FILE. An empty name gives it back its automatic one:
+        its summary's title, else its file name."""
+        body = request.get_json(silent=True)
+        title = body.get("title") if isinstance(body, dict) else None
+        if not isinstance(title, str):
+            return jsonify(error="Type a name for this talk."), 400
+        title = clean_title(title)
+        if len(title) > TITLE_LIMIT:
+            return jsonify(error=f"Keep the name to {TITLE_LIMIT} characters."), 400
+        with lock:
+            job = find_job(job_id)
+
+        def change(meta):
+            if title:
+                meta["title"] = title
+            else:
+                meta.pop("title", None)
+
+        if not update_meta(job["run_dir"], change):
+            with lock:
+                if jobs.get(job_id) is not job:  # deleted meanwhile
+                    abort(404)
+            return jsonify(error="The name could not be saved just now. Try again."), 503
+        with lock:
+            shown, source = shown_title(job)
+        return jsonify(title=shown, title_from=source)
 
     @app.post("/api/jobs/<job_id>/edit")
     def edit_job(job_id):
@@ -1864,16 +2020,15 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
 
     @app.get("/api/history")
     def history():
-        """Every run you can open, newest first, with what each one is doing right now."""
+        """Every run, newest first, with its name and what each one is doing right now."""
         sweep()
         fields = ("id", "name", "model", "mode", "status", "progress", "message", "duration", "size", "started")
         runs = []
         for job in all_runs():
             with lock:
-                if not visible(job):
-                    continue
                 entry = {key: job.get(key) for key in fields}
                 entry["run"] = Path(job["run_dir"]).name
+                entry["title"], entry["title_from"] = shown_title(job)
                 for key in STAGES:
                     state = job.get(key) or {}
                     if state.get("status") in {"queued", "running", "error"}:

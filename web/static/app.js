@@ -14,8 +14,8 @@ let renderedFor = null, sheetKey = null, summaryShown = null, caps = null, stage
 // Details), and the activity log.
 let islandOpen = false, islandKey = '', islandParts = null, sourceLine = '', logReady = false;
 // Keyed `${id}:${stage}`: each step's last seen phase, steps just started here (shown before the server says so), and
-// steps you asked to stop.
-const seen = new Map(), starting = new Map(), stopAsked = new Set();
+// steps you asked to stop. Keyed by talk: names sent to the server and not yet answered, shown over what it last said.
+const seen = new Map(), starting = new Map(), stopAsked = new Set(), renaming = new Map();
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
 const STAGE_KEYS = ['gujlish', 'translation', 'captions', 'summary'];
 const ACTIVE = ['queued', 'loading', 'transcribing'];
@@ -46,6 +46,8 @@ const bare = text => words(text).map(word => word.replace(EDGE, '')).filter(Bool
 const wordKey = word => word.normalize('NFC').toLowerCase().replace(EDGE, '');
 const postJson = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const el = (tag, cls, text) => { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = text; return node; };
+// A talk's name: the one given to it on any device, else its summary's title, else its file name.
+const displayName = run => (run && (run.title || run.name)) || '';
 
 // ---- What each step is called, and its icon in the bottom pill ----
 const svg = body => `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -236,13 +238,16 @@ function runPill(run) {
 function talkRow(run) {
   const row = el('button', 'talk-row'); row.type = 'button';
   const text = el('span'); text.style.minWidth = '0';
-  text.append(el('span', 'name', run.name), el('span', 'sub', [minutes(run.duration), when(run.started)].filter(Boolean).join(' · ')));
+  const name = el('span', 'name', displayName(run)); name.title = displayName(run);
+  // Named talks keep their file name in view, after the length and date.
+  text.append(name, el('span', 'sub', [minutes(run.duration), when(run.started), run.title ? run.name : ''].filter(Boolean).join(' · ')));
   const [label, kind] = runPill(run);
   row.append(text, el('span', `status-pill ${kind}`, label));
   row.onclick = () => select(run.id);
   return row;
 }
 function renderRuns() {
+  for (const id of [...renaming.keys()]) { const naming = namingOf(id); if (naming) Object.assign(runs.find(run => run.id === id) || {}, naming); }
   for (const [key, state] of starting) {  // a step started here shows as starting until the server says it is queued
     const [id, stage] = key.split(':'), run = runs.find(item => item.id === id);
     if (run && !running(run[stage])) run[stage] = { ...state };
@@ -273,7 +278,7 @@ function renderBusy() {
     return;
   }
   const label = { queued: 'Waiting', loading: 'Starting', transcribing: 'Transcribing' }[active.status];
-  $('busy-label').textContent = label; $('busy-name').textContent = active.name;
+  $('busy-label').textContent = label; $('busy-name').textContent = displayName(active);
   $('busy-detail').textContent = 'You can open other talks while this runs.';
   $('busy-percent').textContent = active.status === 'transcribing' && active.progress != null ? `${active.progress}%` : '';
   action.textContent = 'Pause'; action.hidden = false; card.dataset.id = active.id;
@@ -316,7 +321,7 @@ async function loadRuns() {
 function mergeRun(job) {
   const run = runs.find(item => item.id === job.id);
   if (!run) return;
-  for (const key of ['status', 'progress', 'message', 'duration', ...STAGE_KEYS]) run[key] = job[key];
+  for (const key of ['status', 'progress', 'message', 'duration', 'title', 'title_from', ...STAGE_KEYS]) run[key] = job[key];
   renderRuns();
 }
 
@@ -398,7 +403,7 @@ function watchRuns() {
     const before = seen.get(key);
     seen.set(key, now);
     const what = logReady && before !== undefined ? event(before, now, key) : '';
-    if (what) logActivity(EVENT_KINDS[what], `${STEP_NAMES[step]} ${what} · “${run.name}”`, run.id);
+    if (what) logActivity(EVENT_KINDS[what], `${STEP_NAMES[step]} ${what} · “${displayName(run)}”`, run.id);
   };
   for (const run of runs) {
     track(run, 'asr', asrPhase(run, seen.get(`${run.id}:asr`)), asrEvent);
@@ -415,7 +420,7 @@ function watchRuns() {
 
 // ---- One talk ----
 function select(id) {
-  clearTimeout(pollTimer); closeEditor(); notice('');
+  clearTimeout(pollTimer); closeEditor(); closeRename(false); notice('');
   jobId = id; shown = null; current = null; renderedFor = null; sheetKey = null; summaryShown = null; stageNotice = ''; gujlishNotice = ''; sourceLine = '';
   if (id) sessionStorage.setItem('asr-job', id); else sessionStorage.removeItem('asr-job');
   if (!id) { showPage('home'); renderRuns(); return; }
@@ -434,8 +439,10 @@ function part(name) {  // 'status' while transcribing, 'result' once there is a 
   updateDock();
 }
 function renderHead(job) {
-  const name = job.name || '';
-  $('run-title').textContent = name; $('run-title').classList.toggle('long', name.length > 48);
+  const name = displayName(job);
+  $('run-title').textContent = name;
+  $('run-title').classList.toggle('long', name.length > 48); $('run-title').classList.toggle('longer', name.length > 80);
+  $('rename-btn').hidden = !job.id;
   $('run-meta').textContent = [minutes(job.duration), when(job.started)].filter(Boolean).join(' · ');
   const [label, kind] = job.status === 'complete' && !runBadge(job) ? ['', ''] : runPill(job);
   $('run-state').textContent = label; $('run-state').className = `status-pill ${kind}`;
@@ -493,6 +500,7 @@ async function poll() {
     if (!response.ok) throw new Error('Could not read progress.');
     const job = await response.json();
     if (jobId !== id) return;
+    const naming = namingOf(id); if (naming) Object.assign(job, naming);
     for (const key of STAGE_KEYS) if (starting.has(`${id}:${key}`) && !running(job[key])) job[key] = { ...starting.get(`${id}:${key}`) };
     pollFailures = 0; shown = job;
     mergeRun(job);
@@ -694,7 +702,7 @@ function activities() {
   for (const run of runs) {
     if (ACTIVE.includes(run.status)) {
       list.push({ id: run.id, group: 'asr', icon: 'transcribe', label: { queued: 'Waiting', loading: 'Starting', transcribing: 'Transcribing' }[run.status],
-        sub: run.name, percent: run.status === 'transcribing' ? run.progress ?? null : null, waiting: run.status === 'queued',
+        sub: displayName(run), percent: run.status === 'transcribing' ? run.progress ?? null : null, waiting: run.status === 'queued',
         stop: ['Pause', () => act('pause', null, run.id)] });
     }
     let englishStop = false;
@@ -704,7 +712,7 @@ function activities() {
       const [icon, verb, noun] = STAGE_INFO[key], group = key === 'gujlish' ? 'gujlish' : 'english';
       const queued = state.status === 'queued';
       const behind = group === 'english' && STAGE_KEYS.slice(1, index).some(other => running(run[other]));  // the English steps run in turn
-      const item = { id: run.id, group, icon, label: queued ? `${noun} · ${behind ? 'next' : 'starting'}` : verb, sub: run.name,
+      const item = { id: run.id, group, icon, label: queued ? `${noun} · ${behind ? 'next' : 'starting'}` : verb, sub: displayName(run),
         percent: queued ? null : state.progress ?? null, waiting: queued && behind };
       if (starting.has(`${run.id}:${key}`)) { /* just clicked: no Stop until the server has it, so a double-click can't stop it */ }
       else if (group === 'gujlish') item.stop = ['Stop', () => act('stop', { stage: 'gujlish' }, run.id)];
@@ -880,7 +888,7 @@ async function startStage(path, body) {
     if (now && now !== run) now[key] = runState;
   }
   if (gujlish) gujlishNotice = failure; else stageNotice = failure;
-  logActivity('fail', `Couldn’t start ${STEP_NAMES[keys[0]]} · “${job.name || (run && run.name) || 'this talk'}”`, id);
+  logActivity('fail', `Couldn’t start ${STEP_NAMES[keys[0]]} · “${displayName(job) || displayName(run) || 'this talk'}”`, id);
   renderRuns();
   if (current) updateGujlishBar();
 }
@@ -941,12 +949,15 @@ document.addEventListener('click', e => {
   }
   if (islandOpen && !path.includes($('island'))) setIsland(false);
 });
-// Details: this talk's models and the summary's Source note, the workspace, and what the pill's icons mean.
+// Details: this talk's name, file and models and the summary's Source note, the workspace (and signing out), and what
+// the pill's icons mean.
 function renderInfo() {
   const job = jobId && (shown || runs.find(run => run.id === jobId));
   $('info-talk').hidden = !job;
   if (!job) return;
   const rows = [];
+  if (job.title) rows.push(['Name', job.title_from === 'summary' ? `${job.title} (from the summary)` : job.title]);
+  if (job.name) rows.push(['File', job.name]);
   if (job.model) rows.push(['Transcribed with', job.model[0].toUpperCase() + job.model.slice(1)]);
   const script = job.mode === 'native' ? 'Everything in Gujarati script' : job.mode === 'mixed' ? 'English words in English letters' : '';
   if (script) rows.push(['Script', script]);
@@ -982,7 +993,7 @@ async function act(path, body, id = jobId, button = null) {
     if (!message) return false;
     notice(message);
     // The notice shows only on that talk's page; anywhere else, the activity log keeps it.
-    if (page !== 'run' || id !== jobId) logActivity('fail', `Couldn’t ${path} “${(runs.find(run => run.id === id) || {}).name || 'a talk'}” · ${message}`, id);
+    if (page !== 'run' || id !== jobId) logActivity('fail', `Couldn’t ${path} “${displayName(runs.find(run => run.id === id)) || 'a talk'}” · ${message}`, id);
     return false;
   };
   try {
@@ -1005,15 +1016,73 @@ $('delete-button').addEventListener('click', async () => {
   if (!job) return;
   const finished = job.status === 'complete';
   const yes = await ask(finished ? 'Delete this recording?' : 'Cancel this recording?',
-    finished ? `“${job.name}” and its transcript, Gujlish, English and summary are deleted. Fixes already in your dictionary stay.`
-      : `“${job.name}” stops, and the recording and the progress so far are deleted.`,
+    finished ? `“${displayName(job)}” and its transcript, Gujlish, English and summary are deleted. Fixes already in your dictionary stay.`
+      : `“${displayName(job)}” stops, and the recording and the progress so far are deleted.`,
     [{ label: finished ? 'Delete' : 'Cancel recording', value: true, kind: 'btn-accent danger' }, { label: 'Keep it', value: false }]);
   if (!yes) return;
   const id = jobId;
   if (await act('delete', null, id, $('delete-button'))) {
-    logActivity('info', `${finished ? 'Deleted' : 'Cancelled'} “${job.name}”`);
+    logActivity('info', `${finished ? 'Deleted' : 'Cancelled'} “${displayName(job)}”`);
     runs = runs.filter(run => run.id !== id); if (jobId === id) select(null);
   }
+});
+
+// ---- Naming a talk: saved on the server, so every device shows it. Empty gives back the automatic name ----
+function openRename() {
+  const job = shown || runs.find(run => run.id === jobId);
+  if (!job) return;
+  $('rename-input').value = displayName(job);
+  $('title-row').hidden = true; $('rename-form').hidden = false; $('rename-btn').setAttribute('aria-expanded', 'true');
+  $('rename-input').focus(); $('rename-input').select();
+}
+function closeRename(refocus = true) {
+  if ($('rename-form').hidden) return;
+  $('rename-form').hidden = true; $('title-row').hidden = false; $('rename-btn').setAttribute('aria-expanded', 'false');
+  if (refocus) $('rename-btn').focus();
+}
+// A name typed here shows while it saves, then holds a few seconds longer over answers asked for before it was saved
+// (a progress check or the list, still on their way), so they don't bring the old name back.
+const NAME_SETTLES_MS = 10000;
+function namingOf(id) {
+  const naming = renaming.get(id);
+  if (naming && naming.until && Date.now() > naming.until) { renaming.delete(id); return null; }
+  return naming ? { title: naming.title ?? null, title_from: naming.title_from ?? null } : null;
+}
+// Every copy of the talk on this page takes the name: the list, the talk on screen and its header.
+function showName(id, naming) {
+  const fields = { title: naming.title ?? null, title_from: naming.title_from ?? null };
+  for (const job of [shown, current, runs.find(run => run.id === id)]) if (job && job.id === id) Object.assign(job, fields);
+  renderRuns();
+  if (jobId === id && shown) renderHead(shown);
+}
+async function saveRename() {
+  const id = jobId, job = shown || runs.find(run => run.id === id);
+  const typed = $('rename-input').value.replace(/\s+/g, ' ').trim();
+  closeRename();
+  if (!job || typed === displayName(job)) return;
+  const before = { title: job.title ?? null, title_from: job.title_from ?? null };
+  // Shown at once; after clearing, the file name shows until the server answers with the automatic name.
+  const naming = typed ? { title: typed, title_from: 'user' } : { title: null, title_from: null };
+  renaming.set(id, naming); showName(id, naming);
+  let failure = '';
+  try {
+    const response = await postJson(`/api/jobs/${id}/rename`, { title: typed });
+    if (signedOut(response)) return;
+    const data = await response.json().catch(() => ({}));
+    if (renaming.get(id) !== naming) return;  // named again meanwhile: the later name wins
+    if (response.ok) { renaming.set(id, { ...data, until: Date.now() + NAME_SETTLES_MS }); showName(id, data); return; }
+    failure = data.error || 'That did not work. Try again.';
+  } catch { failure = `Could not reach ${SERVER}.`; }
+  if (renaming.get(id) !== naming) return;
+  renaming.delete(id); showName(id, before);
+  if (page === 'run' && jobId === id) notice(`The name was not changed. ${failure}`);
+  else logActivity('fail', `Couldn’t rename “${displayName(job)}” · ${failure}`, id);
+}
+$('rename-btn').addEventListener('click', openRename);
+$('rename-cancel').addEventListener('click', () => closeRename());
+$('rename-form').addEventListener('submit', e => { e.preventDefault(); saveRename(); });
+$('rename-input').addEventListener('keydown', e => {  // Escape leaves the name as it was, and nothing else
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeRename(); }
 });
 
 // ---- Adding a recording: it uploads as soon as it is dropped or chosen, and carries on while you look at others ----
@@ -1054,7 +1123,7 @@ async function uploadInPieces(file, mine) {
   const signal = mine.controller.signal;
   const started = await fetch('/api/uploads', { method: 'POST', signal });
   if (signedOut(started)) return null;
-  if (!started.ok) throw new Error('Could not start the upload.');
+  if (!started.ok) throw new Error((await started.json().catch(() => ({}))).error || 'Could not start the upload.');
   const { id } = await started.json();
   let offset = 0;
   while (offset < file.size) {
@@ -1102,10 +1171,10 @@ async function addRecording(file) {
     upload = null; uploadChanged();  // nothing runs while you decide, so the page stops checking for news
     const others = known.runs.length > 1 ? ` (and ${known.runs.length - 1} more)` : '';
     const choice = await ask('You already have this recording',
-      `“${same.name}”${same.started ? `, added ${when(same.started)},` : ''}${others} has exactly the same audio.`,
+      `“${displayName(same)}”${same.started ? `, added ${when(same.started)},` : ''}${others} has exactly the same audio.`,
       [{ label: 'Open it', value: 'open', kind: 'btn-accent' }, { label: 'Transcribe again', value: 'again' }, { label: 'Cancel', value: null }]);
     if (choice !== 'again') {
-      logActivity('info', `Not uploaded · you already have “${same.name}”`, same.id);
+      logActivity('info', `Not uploaded · you already have “${displayName(same)}”`, same.id);
       if (choice === 'open') select(same.id);
       return;
     }

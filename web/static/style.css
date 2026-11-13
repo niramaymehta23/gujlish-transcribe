@@ -83,6 +83,15 @@ select{height:44px;padding:0 12px;border-radius:var(--r-field);border:1px solid 
 .meta{margin:0;font-family:var(--mono);font-size:12px;color:var(--muted)}
 .title{margin:6px 0 0;font-family:var(--display);font-size:46px;line-height:1.05;letter-spacing:-.035em;font-weight:700;overflow-wrap:anywhere}
 .title.long{font-size:36px;line-height:1.1}
+.title.longer{font-size:30px;line-height:1.15}
+.title-row{display:flex;align-items:flex-start;gap:2px;margin-top:6px}
+.title-row .title{margin:0;min-width:0}
+.rename-btn{flex:none;width:40px;min-height:40px;margin-top:2px;color:var(--faint)}
+.rename-btn:hover,.rename-btn:focus-visible{color:var(--ink)}
+.rename{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+.rename-row{display:flex;align-items:center;gap:8px}
+.rename input{flex:1;min-width:0;height:52px;border-radius:var(--r-field);border:2px solid var(--ink);background:var(--card);padding:0 14px;font-family:var(--display);font-size:24px;font-weight:600;letter-spacing:-.02em}
+.rename input:focus{outline:3px solid var(--amber-wash);outline-offset:1px}
 .lede{margin:12px 0 0;color:var(--muted);line-height:1.6}
 .section-title{margin:0 0 10px;font-family:var(--display);font-size:22px;letter-spacing:-.02em;font-weight:700}
 
@@ -130,7 +139,7 @@ select{height:44px;padding:0 12px;border-radius:var(--r-field);border:1px solid 
 .talk-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:16px 18px;border-radius:var(--r-panel);text-decoration:none;color:var(--ink);background:none;border:0;text-align:left;cursor:pointer;width:100%}
 .talk-row:hover{background:var(--card);box-shadow:0 0 0 1px var(--line)}
 .talk-row .name{display:block;font-size:17px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.talk-row .sub{display:block;margin-top:3px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+.talk-row .sub{display:block;margin-top:3px;font-family:var(--mono);font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .status-pill{display:inline-flex;align-items:center;min-height:30px;padding:0 12px;border-radius:var(--pill);font-size:13px;font-weight:600;white-space:nowrap;background:#EFEBE4;color:#5B5566}
 .status-pill:empty{display:none}
 .status-pill.fix{background:var(--amber-wash);color:#7A3E06}
@@ -335,6 +344,8 @@ button.activity-row:hover{background:var(--hover)}
 .info-list dt{color:var(--muted)}
 .info-list dd{margin:0;overflow-wrap:anywhere}
 .info-source{margin:0;padding:10px 14px;border-radius:var(--r-field);background:#F7F2E8;color:var(--muted);font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.info-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.info-row form{margin:0}
 .info-workspace{display:flex;align-items:center;gap:8px;margin:0;font-size:14px}
 .info-workspace i{flex:none;width:7px;height:7px;border-radius:50%;background:var(--ok)}
 .legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
@@ -381,6 +392,10 @@ button.activity-row:hover{background:var(--hover)}
   .column{padding:4px 16px 180px}
   .title{font-size:34px} .hero{font-size:44px}
   .title.long{font-size:26px}
+  .title.longer{font-size:22px;line-height:1.2}
+  .rename-btn{width:36px;min-height:36px;margin-top:0}
+  .rename-row{flex-wrap:wrap}
+  .rename input{flex-basis:100%;height:48px;font-size:20px}
   .run-top{flex-wrap:nowrap}
   .run-top .meta{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .run-actions{flex:none;flex-wrap:nowrap}
