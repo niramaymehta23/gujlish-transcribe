@@ -7,8 +7,9 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 HF_HOME=/models
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt "gunicorn>=23,<24"
+# Exact versions, so a rebuild installs what was tested (deploy/lock.sh updates them).
+COPY requirements.lock .
+RUN pip install -r requirements.lock
 
 # Which models the site offers (comma-separated: flex, gujlish). Flex is gated: the build needs a Hugging Face token
 # (passed as the hf_token build secret), and hosting it for other people needs Bodhan AI's approval under its license.

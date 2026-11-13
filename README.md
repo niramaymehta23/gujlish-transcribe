@@ -281,7 +281,7 @@ harisena-vaani-studio/
 Run the checks (no model download or GPU needed):
 
 ```bash
-python -m pip install -r requirements-test.txt
+python -m pip install -r requirements-test.lock
 python -m unittest discover -s tests -v
 python -m ruff check .
 python -m ruff format --check .

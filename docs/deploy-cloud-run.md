@@ -64,6 +64,13 @@ Main Cloud Run settings, all in `deploy/deploy.sh` and `deploy/config.sh`:
 - **One transcription at a time.** Recordings queue on the website and show how many are ahead.
 - **Recordings and results** are stored in the Cloud Storage bucket, mounted at `/data`, with one copy of each recording: `recordings/.fingerprints.json` keeps each file's SHA-256, and each time an instance starts it merges identical copies and removes leftovers from uploads that never became a run. So is your correction dictionary (`dictionary.json`, with its audio clips in `dictionary-clips/`), so fixes made on the site survive restarts and redeploys.
 
+## Package versions
+
+The image installs `requirements.lock`, which pins every Python package to an exact version, so a rebuild installs what was tested and never a newer release. The checks on GitHub install `requirements-test.lock`, pinned to the same versions.
+
+- **After changing `requirements.txt`:** run `deploy/lock.sh` (it needs [uv](https://docs.astral.sh/uv/)). Packages already pinned keep their versions. A test fails if a package is missing from the lock.
+- **To upgrade on purpose:** run `deploy/lock.sh --upgrade` (or `--upgrade-package torch`), run the checks, then deploy. New pins rebuild the image's later layers, so that deploy downloads the models again and takes longer.
+
 ## Costs
 
 **What you pay for:**
