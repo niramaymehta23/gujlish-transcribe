@@ -10,6 +10,12 @@ let lastActivity = Date.now(), napping = false, wasBusy = false;
 // page: 'home', 'dict' or 'run'. view: the talk's step on screen. script: how its words are shown.
 let page = 'home', view = 'fix', script = 'gu';
 let renderedFor = null, sheetKey = null, summaryShown = null, caps = null, stageNotice = '', gujlishNotice = '', dockAction = null, dockAltAction = null;
+// The bottom pill (islandOpen: expanded; islandParts: its drawn rings and texts), the summary's Source note (shown in
+// Details), and the activity log.
+let islandOpen = false, islandKey = '', islandParts = null, sourceLine = '', logReady = false;
+// Keyed `${id}:${stage}`: each step's last seen phase, steps just started here (shown before the server says so), and
+// steps you asked to stop.
+const seen = new Map(), starting = new Map(), stopAsked = new Set();
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
 const STAGE_KEYS = ['gujlish', 'translation', 'captions', 'summary'];
 const ACTIVE = ['queued', 'loading', 'transcribing'];
@@ -41,6 +47,45 @@ const wordKey = word => word.normalize('NFC').toLowerCase().replace(EDGE, '');
 const postJson = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const el = (tag, cls, text) => { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = text; return node; };
 
+// ---- What each step is called, and its icon in the bottom pill ----
+const svg = body => `<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const ICONS = {
+  upload: svg('<path d="M8 10V2.6M4.9 5.6 8 2.6l3.1 3M2.5 9.5v3.8h11V9.5"/>'),
+  transcribe: svg('<path d="M2 7v2M5 4.5v7M8 2.5v11M11 5v6M14 7v2"/>'),
+  gujlish: svg('<path d="M1.6 12.8 4.6 3.4h.8l3 9.4M2.7 9.6h4.6M14 7.6v5.2M11.7 7.6a2.3 2.6 0 1 0 0 5.2 2.3 2.6 0 1 0 0-5.2"/>'),
+  translate: svg('<path d="M1.6 3.6h6.8M5 2v1.6M7 3.6c-.5 2.8-2.4 5-5 6.2M3.4 6c.8 1.7 2.2 3 3.9 3.7M8.6 14l2.7-6.4h.5L14.5 14M9.7 11.8h3.7"/>'),
+  captions: svg('<rect x="1.6" y="3" width="12.8" height="10" rx="2.2"/><path d="M4.2 7.8h4.2M10.4 7.8h1.4M4.2 10.4h2M8.2 10.4h3.6"/>'),
+  summary: svg('<path d="M4 1.8h5.3l2.9 2.9v9.5H4z"/><path d="M9.2 1.8v3h3M6.2 7.6h4M6.2 9.9h4M6.2 12.2h2.4"/>'),
+};
+const LEGEND = [
+  ['upload', 'Uploading a recording'], ['transcribe', 'Transcribing the speech'], ['gujlish', 'Writing Gujlish (Gujarati in Latin letters)'],
+  ['translate', 'Translating into English'], ['captions', 'Timing the English subtitles'], ['summary', 'Writing the summary and YouTube details'],
+];
+const STAGE_INFO = { gujlish: ['gujlish', 'Writing Gujlish', 'Gujlish'], translation: ['translate', 'Translating', 'English'], captions: ['captions', 'Timing subtitles', 'Subtitles'], summary: ['summary', 'Summarising', 'Summary'] };
+const STEP_NAMES = { asr: 'Transcription', gujlish: 'Gujlish', translation: 'English translation', captions: 'Subtitle timing', summary: 'Summary and YouTube details' };
+const STAGES_OF = { english: ['translation', 'captions', 'summary'], translate: ['translation', 'captions'], captions: ['captions'], summarize: ['summary'], gujlish: ['gujlish'] };
+const UPLOAD_PHASES = {
+  reading: ['Reading the file', file => `${mb(file.size)} · reading it on this device`],
+  checking: ['Checking for a copy', () => 'Seeing whether you already have this recording'],
+  uploading: ['Uploading', file => HOSTED ? `${mb(file.size)} · sending your recording to the server` : `${mb(file.size)} · saving to the local workspace`],
+  starting: ['Starting', () => 'Handing it to the transcriber'],
+};
+// An icon in a ring: the ring fills with `percent`, spins while there is no measure yet, and is dotted while waiting.
+function ring(icon, percent = null, waiting = false) {
+  const box = el('span', 'ring');
+  box.innerHTML = `<svg viewBox="0 0 36 36" aria-hidden="true"><circle class="track" cx="18" cy="18" r="16" pathLength="100"/><circle class="arc" cx="18" cy="18" r="16" pathLength="100"/></svg>${ICONS[icon]}`;
+  return setRing(box, percent, waiting);
+}
+function setRing(box, percent, waiting) {
+  const cls = `ring${waiting ? ' waiting' : percent == null ? ' spinning' : ''}`;
+  const arc = waiting ? 100 : percent == null ? 28 : Math.max(2, Math.min(100, Number(percent) || 0));
+  const circle = box.querySelector('.arc'), dash = `${arc} 100`;
+  if (box.className !== cls) box.className = cls;
+  if (circle.getAttribute('stroke-dasharray') !== dash) circle.setAttribute('stroke-dasharray', dash);
+  return box;
+}
+const put = (node, text) => { if (node.textContent !== text) node.textContent = text; };
+
 // Whether live updates may ask the server again: the tab is on screen and you were active recently.
 function awake() {
   if (document.hidden) return false;
@@ -58,9 +103,10 @@ async function loadUsage() {
     const data = await response.json();
     if (!data.gpu) return;
     const used = data.seconds < 3600 ? `${Math.round(data.seconds / 60)} min` : `${(data.seconds / 3600).toFixed(1)} h`;
-    box.textContent = ` · GPU this month: ${used}${data.cap_hours ? ` of ${data.cap_hours} h` : ''} · ≈ £${data.cost.toFixed(2)}`;
+    box.textContent = `GPU this month: ${used}${data.cap_hours ? ` of ${data.cap_hours} h` : ''} · ≈ £${data.cost.toFixed(2)}`;
     box.classList.toggle('over', data.over_cap);
     box.hidden = false;
+    $('info-dot').hidden = !data.over_cap;
   } catch { /* the line is only informative */ }
 }
 function note(text) {
@@ -87,6 +133,10 @@ function ask(title, text, actions) {
     const buttons = [...$('modal-actions').children];
     (buttons.find(button => !button.classList.contains('danger')) || buttons[0]).focus();
   });
+}
+// Waits until no popup question is open, so a second question never replaces one still waiting for an answer.
+async function modalClosed() {
+  while ($('modal').open) await new Promise(resolve => $('modal').addEventListener('close', resolve, { once: true }));
 }
 async function copyText(button, text, label) {
   try { await navigator.clipboard.writeText(text || ''); button.textContent = 'Copied ✓'; }
@@ -148,7 +198,9 @@ function showPage(name) {
   page = name;
   $('home').hidden = name !== 'home'; $('dict-view').hidden = name !== 'dict'; $('run-view').hidden = name !== 'run';
   $('all-talks').hidden = name === 'home';
-  if (name !== 'run') { closeExport(); $('export-btn').hidden = true; $('dock-wrap').hidden = true; }
+  closePops(); islandOpen = false;
+  if (name !== 'run') $('export-btn').hidden = true;
+  updateDock();
   window.scrollTo(0, 0);
 }
 function openDictionary() {
@@ -191,26 +243,33 @@ function talkRow(run) {
   return row;
 }
 function renderRuns() {
+  for (const [key, state] of starting) {  // a step started here shows as starting until the server says it is queued
+    const [id, stage] = key.split(':'), run = runs.find(item => item.id === id);
+    if (run && !running(run[stage])) run[stage] = { ...state };
+  }
+  watchRuns();
   const rows = runs.map(talkRow);
   if (!rows.length) rows.push(el('p', 'muted', 'No talks yet. Drop one above.'));
   $('history').replaceChildren(...rows);
   $('runs-count').textContent = runs.length || '';
-  renderBusy();
+  renderBusy(); updateDock();
 }
 // The card on the home page: the upload in progress, or else the talk being transcribed now.
 function renderBusy() {
   const card = $('busy'), action = $('busy-action');
   const active = runs.find(run => run.status === 'transcribing') || runs.find(run => ACTIVE.includes(run.status));
   card.hidden = !upload && !active;
+  renderPhases();
   if (card.hidden) return;
   if (upload) {
-    $('busy-label').textContent = upload.error ? 'Upload failed' : upload.checking ? 'Checking the audio' : 'Uploading';
+    const [label, detail] = UPLOAD_PHASES[upload.phase];
+    $('busy-label').textContent = upload.error ? 'Upload failed' : label;
     $('busy-name').textContent = upload.name;
-    $('busy-detail').textContent = upload.error || (HOSTED ? `${mb(upload.size)} · sending your recording to the server` : `${mb(upload.size)} · saving to the local workspace`);
-    $('busy-percent').textContent = upload.error || upload.checking ? '' : `${upload.percent}%`;
+    $('busy-detail').textContent = upload.error || detail(upload);
+    $('busy-percent').textContent = !upload.error && upload.phase === 'uploading' ? `${upload.percent}%` : '';
     action.textContent = upload.error ? 'Dismiss' : 'Cancel upload'; action.hidden = false;
     card.dataset.id = '';
-    drawWave($('busy-wave'), upload.checking ? null : upload.percent, Boolean(upload.error));
+    drawWave($('busy-wave'), upload.phase === 'uploading' ? upload.percent : null, Boolean(upload.error));
     return;
   }
   const label = { queued: 'Waiting', loading: 'Starting', transcribing: 'Transcribing' }[active.status];
@@ -220,13 +279,25 @@ function renderBusy() {
   action.textContent = 'Pause'; action.hidden = false; card.dataset.id = active.id;
   drawWave($('busy-wave'), active.status === 'transcribing' ? active.progress : null, false);
 }
+// Reading · Checking · Uploading N% · Starting, under the upload card.
+function renderPhases() {
+  const box = $('busy-phases');
+  box.hidden = !upload;
+  if (!upload) return;
+  const order = Object.keys(UPLOAD_PHASES), at = order.indexOf(upload.phase);
+  box.replaceChildren(...order.map((phase, i) => {
+    const skipped = phase === 'uploading' && upload.stored;
+    const label = skipped ? 'Already uploaded' : phase === 'uploading' && i === at ? `Uploading ${upload.percent}%` : phase[0].toUpperCase() + phase.slice(1);
+    const state = i < at || skipped ? 'done' : i === at ? (upload.error ? 'failed' : 'current') : '';
+    const item = el('li', state, state === 'done' ? `✓ ${label}` : label);
+    if (i === at) item.setAttribute('aria-current', 'step');
+    return item;
+  }));
+}
 $('busy').addEventListener('click', e => { if (!e.target.closest('button') && $('busy').dataset.id) select($('busy').dataset.id); });
-$('busy-action').addEventListener('click', async () => {
-  if (!upload) { const id = $('busy').dataset.id; if (id) act('pause', null, id); return; }
-  if (!upload.error && !await ask('Cancel this upload?', `“${upload.name}” stops uploading and is not transcribed.`,
-    [{ label: 'Cancel upload', value: true, kind: 'btn-accent danger' }, { label: 'Keep uploading', value: false }])) return;
-  if (upload) upload.controller.abort();
-  upload = null; renderBusy();
+$('busy-action').addEventListener('click', () => {
+  if (!upload) { const id = $('busy').dataset.id; if (id) act('pause', null, id, $('busy-action')); return; }
+  cancelUpload();
 });
 async function loadRuns() {
   clearTimeout(runsTimer);
@@ -249,10 +320,103 @@ function mergeRun(job) {
   renderRuns();
 }
 
+// ---- The activity log: uploads and steps started, finished, failed or stopped, kept in this tab ----
+const KINDS = ['start', 'done', 'fail', 'info'];
+const EVENT_KINDS = { started: 'start', resumed: 'start', finished: 'done', failed: 'fail', stopped: 'info', paused: 'info' };
+const feed = loadFeed();
+function loadFeed() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('vaani-activity'));
+    if (saved && Array.isArray(saved.items) && Number.isInteger(saved.unread)) {
+      const items = saved.items.filter(item => item && KINDS.includes(item.kind) && typeof item.text === 'string'
+        && Number.isFinite(item.at) && (item.id == null || typeof item.id === 'string')).slice(0, 50);
+      return { items, unread: Math.max(0, Math.min(saved.unread, items.length)) };
+    }
+  } catch { /* nothing saved, or storage is off */ }
+  return { items: [], unread: 0 };
+}
+function saveFeed() { try { sessionStorage.setItem('vaani-activity', JSON.stringify(feed)); } catch { /* the log is only kept while the page is open */ } }
+function logActivity(kind, text, id = null) {
+  feed.items.unshift({ kind, text, id, at: Date.now() });
+  feed.items.length = Math.min(feed.items.length, 50);
+  if ($('activity').hidden) feed.unread++;
+  saveFeed(); renderActivity();
+}
+function renderActivity(read) {
+  if (read && feed.unread) { feed.unread = 0; saveFeed(); }
+  $('bell-dot').hidden = !feed.unread;
+  $('bell-btn').setAttribute('aria-label', feed.unread ? `Activity, ${feed.unread} new` : 'Activity');
+  const rows = feed.items.map(item => {
+    const row = el('li', `activity-item ${item.kind}`), body = el(item.id ? 'button' : 'div', 'activity-row');
+    if (item.id) { body.type = 'button'; body.title = 'Open this talk'; body.onclick = () => { closePop('activity'); select(item.id); }; }
+    const at = new Date(item.at), stamp = el('time', '', at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    stamp.dateTime = at.toISOString();
+    const dot = el('i', 'kind-dot'); dot.setAttribute('aria-hidden', 'true');
+    body.append(dot, el('span', 'activity-text', item.text), stamp);
+    row.append(body);
+    return row;
+  });
+  if (!rows.length) rows.push(el('li', 'activity-empty', 'Nothing yet. Uploads and steps you start show up here.'));
+  $('activity-list').replaceChildren(...rows);
+}
+$('activity-clear').addEventListener('click', () => { feed.items = []; feed.unread = 0; saveFeed(); renderActivity(); });
+// Each talk's transcription and steps, as phases; a change between two looks at the list is logged.
+function asrPhase(run, before) {
+  const phase = { queued: 'wait', loading: 'wait', transcribing: 'run', paused: 'pause', error: 'fail', complete: 'done' }[run.status] || 'rest';
+  return phase === 'wait' && (before === 'pause' || before === 'resume') ? 'resume' : phase;
+}
+function asrEvent(before, now) {
+  if (now === 'run') return before === 'pause' ? 'resumed' : before === 'resume' || before === 'run' ? '' : 'started';
+  if (now === 'resume') return before === 'pause' ? 'resumed' : '';
+  if (now === 'done') return ['wait', 'run', 'resume'].includes(before) ? 'finished' : '';
+  if (now === 'fail' && before !== 'fail') return 'failed';
+  if (now === 'pause' && before !== 'pause') return 'paused';
+  return '';
+}
+function stagePhase(state) {
+  if (!state) return 'rest';
+  if (state.status === 'running') return 'run';
+  if (state.status === 'queued') return 'wait';
+  if (state.status === 'error') return 'fail';
+  if (state.message === STOPPED) return 'stop';
+  return state.status === 'complete' ? 'done' : 'rest';  // the talk list leaves out most finished steps: also 'rest'
+}
+function stageEvent(before, now, asked) {
+  if (now === 'run') return before === 'run' ? '' : 'started';
+  if (before !== 'run' && before !== 'wait') return now === 'fail' && before !== 'fail' ? 'failed' : '';
+  if (now === 'wait') return '';
+  if (now === 'fail') return 'failed';
+  if (now === 'stop' || asked) return before === 'run' ? 'stopped' : '';  // steps that were only queued just drop away
+  return now === 'done' || before === 'run' ? 'finished' : '';
+}
+function watchRuns() {
+  const present = new Set();
+  const track = (run, step, now, event) => {
+    const key = `${run.id}:${step}`;
+    present.add(key);
+    if (starting.has(key)) return;
+    const before = seen.get(key);
+    seen.set(key, now);
+    const what = logReady && before !== undefined ? event(before, now, key) : '';
+    if (what) logActivity(EVENT_KINDS[what], `${STEP_NAMES[step]} ${what} · “${run.name}”`, run.id);
+  };
+  for (const run of runs) {
+    track(run, 'asr', asrPhase(run, seen.get(`${run.id}:asr`)), asrEvent);
+    for (const step of STAGE_KEYS) {
+      track(run, step, stagePhase(run[step]), (before, now, key) => {
+        const asked = stopAsked.has(key);
+        if (asked && now !== 'run' && now !== 'wait') stopAsked.delete(key);
+        return stageEvent(before, now, asked);
+      });
+    }
+  }
+  for (const key of [...seen.keys()]) if (!present.has(key)) seen.delete(key);
+}
+
 // ---- One talk ----
 function select(id) {
-  clearTimeout(pollTimer); closeEditor(); closeExport(); notice('');
-  jobId = id; shown = null; current = null; renderedFor = null; sheetKey = null; summaryShown = null; stageNotice = ''; gujlishNotice = '';
+  clearTimeout(pollTimer); closeEditor(); notice('');
+  jobId = id; shown = null; current = null; renderedFor = null; sheetKey = null; summaryShown = null; stageNotice = ''; gujlishNotice = ''; sourceLine = '';
   if (id) sessionStorage.setItem('asr-job', id); else sessionStorage.removeItem('asr-job');
   if (!id) { showPage('home'); renderRuns(); return; }
   showPage('run');
@@ -266,20 +430,22 @@ function select(id) {
 function part(name) {  // 'status' while transcribing, 'result' once there is a transcript
   $('processing').hidden = name !== 'status';
   $('result').hidden = name !== 'result';
-  if (name !== 'result') { $('export-btn').hidden = true; $('dock-wrap').hidden = true; }
+  if (name !== 'result') $('export-btn').hidden = true;
+  updateDock();
 }
 function renderHead(job) {
-  $('run-title').textContent = job.name || '';
-  const script = job.mode === 'native' ? 'Everything in Gujarati script' : job.mode === 'mixed' ? 'English words in English letters' : '';
-  const model = job.model ? job.model[0].toUpperCase() + job.model.slice(1) : '';
-  $('run-meta').textContent = [minutes(job.duration), model, script, when(job.started)].filter(Boolean).join(' · ');
+  const name = job.name || '';
+  $('run-title').textContent = name; $('run-title').classList.toggle('long', name.length > 48);
+  $('run-meta').textContent = [minutes(job.duration), when(job.started)].filter(Boolean).join(' · ');
   const [label, kind] = job.status === 'complete' && !runBadge(job) ? ['', ''] : runPill(job);
   $('run-state').textContent = label; $('run-state').className = `status-pill ${kind}`;
   const active = ACTIVE.includes(job.status), stopped = job.status === 'paused' || job.status === 'error';
   $('pause-button').hidden = !active;
   $('resume-button').hidden = !stopped;
-  $('delete-button').textContent = job.status === 'complete' ? 'Delete' : 'Cancel';
+  $('delete-label').textContent = job.status === 'complete' ? 'Delete' : 'Cancel';
+  $('delete-button').title = job.status === 'complete' ? 'Delete this talk' : 'Cancel this recording';
   renderSteps(job);
+  renderInfo();
 }
 function renderSteps(job) {
   const complete = job.status === 'complete';
@@ -327,6 +493,7 @@ async function poll() {
     if (!response.ok) throw new Error('Could not read progress.');
     const job = await response.json();
     if (jobId !== id) return;
+    for (const key of STAGE_KEYS) if (starting.has(`${id}:${key}`) && !running(job[key])) job[key] = { ...starting.get(`${id}:${key}`) };
     pollFailures = 0; shown = job;
     mergeRun(job);
     if (job.status === 'complete') {
@@ -372,8 +539,14 @@ function renderView() {
   $('hint').textContent = view === 'translate' ? 'English under every line. Double-click a word to keep fixing.' : 'Double-click any word to fix it.';
   if (view !== 'summary') renderSheet();
   if (current.summary_markdown !== summaryShown) {
-    summaryShown = current.summary_markdown;
-    if (summaryShown) renderMarkdown($('summary'), summaryShown); else $('summary').replaceChildren();
+    summaryShown = current.summary_markdown; sourceLine = '';
+    if (summaryShown) {
+      renderMarkdown($('summary'), summaryShown);
+      // The "Source: … machine-generated" note moves to Details, beside the models that made the summary.
+      const source = [...$('summary').querySelectorAll('blockquote')].find(quote => quote.textContent.trim().startsWith('Source:'));
+      if (source) { sourceLine = source.textContent.trim(); source.remove(); }
+    } else $('summary').replaceChildren();
+    renderInfo();
   }
   $('youtube').hidden = !current.youtube;
   if (current.youtube) { $('yt-title').textContent = current.youtube.title; $('yt-description').textContent = current.youtube.description; }
@@ -501,21 +674,50 @@ function updateGujlishBar() {
     : current.gujlish_tokens ? 'Gujarati in Latin letters, word for word. Fix a word in either script: the Gujlish spellings you type are remembered too.'
     : 'Gujarati in Latin letters, word for word, written after transcribing.';
   $('gujlish-button').hidden = !label || busy; $('gujlish-button').textContent = label || '';
-  $('gujlish-alt').hidden = !alt; $('gujlish-stop').hidden = !busy;
+  // No Stop until the server has the step you just clicked, so a double-click can't stop it again.
+  $('gujlish-alt').hidden = !alt; $('gujlish-stop').hidden = !busy || starting.has(`${current.id}:gujlish`);
   $('gujlish-status').textContent = gujlishNotice || (busy || state.status === 'error' || state.message === STOPPED ? state.message || '' : '');
 }
 $('gujlish-button').addEventListener('click', () => startStage('gujlish'));
 $('gujlish-alt').addEventListener('click', () => startStage('gujlish', { engine: 'gemini' }));
-$('gujlish-stop').addEventListener('click', () => act('stop', { stage: 'gujlish' }));
+$('gujlish-stop').addEventListener('click', () => act('stop', { stage: 'gujlish' }, jobId, $('gujlish-stop')));
 
-// ---- The dock: where the talk stands, and the one thing to do next ----
-function updateDock() {
-  const wrap = $('dock-wrap'), dock = $('dock');
-  wrap.hidden = page !== 'run' || !current;
-  if (wrap.hidden) return;
+// ---- The bottom pill (an island): the main thing running, or the talk's next step; other running steps sit beside
+// it as circles; tap it to see everything running, stop a step, or read what the icons mean ----
+// Everything in progress: the upload, transcriptions, and each talk's queued or running steps.
+function activities() {
+  const list = [];
+  if (upload && !upload.error) {
+    list.push({ id: null, group: 'upload', icon: 'upload', label: UPLOAD_PHASES[upload.phase][0], sub: upload.name,
+      percent: upload.phase === 'uploading' ? upload.percent : null, waiting: false, stop: ['Cancel', cancelUpload] });
+  }
+  for (const run of runs) {
+    if (ACTIVE.includes(run.status)) {
+      list.push({ id: run.id, group: 'asr', icon: 'transcribe', label: { queued: 'Waiting', loading: 'Starting', transcribing: 'Transcribing' }[run.status],
+        sub: run.name, percent: run.status === 'transcribing' ? run.progress ?? null : null, waiting: run.status === 'queued',
+        stop: ['Pause', () => act('pause', null, run.id)] });
+    }
+    let englishStop = false;
+    STAGE_KEYS.forEach((key, index) => {
+      const state = run[key];
+      if (!running(state)) return;
+      const [icon, verb, noun] = STAGE_INFO[key], group = key === 'gujlish' ? 'gujlish' : 'english';
+      const queued = state.status === 'queued';
+      const behind = group === 'english' && STAGE_KEYS.slice(1, index).some(other => running(run[other]));  // the English steps run in turn
+      const item = { id: run.id, group, icon, label: queued ? `${noun} · ${behind ? 'next' : 'starting'}` : verb, sub: run.name,
+        percent: queued ? null : state.progress ?? null, waiting: queued && behind };
+      if (starting.has(`${run.id}:${key}`)) { /* just clicked: no Stop until the server has it, so a double-click can't stop it */ }
+      else if (group === 'gujlish') item.stop = ['Stop', () => act('stop', { stage: 'gujlish' }, run.id)];
+      else if (!englishStop) { englishStop = true; item.stop = ['Stop', () => act('stop', { stage: 'english' }, run.id)]; }
+      list.push(item);
+    });
+  }
+  return list;
+}
+// The talk's next step when nothing of its English is running: a note and up to two buttons.
+function nextStep() {
   const gemini = Boolean(caps && caps.gemini);
   const translation = stageState('translation'), captions = stageState('captions'), summary = stageState('summary');
-  const working = [translation, captions, summary].find(running);
   const failed = [translation, captions, summary].find(s => s.status === 'error' || s.message === STOPPED);
   const english = translation.status === 'complete', summarised = summary.status === 'complete';
   const stale = Boolean(current.english_stale || current.summary_stale);
@@ -524,10 +726,7 @@ function updateDock() {
   const fixed = fixes ? `${fixes} word${fixes === 1 ? '' : 's'} fixed` : 'Fix any misheard words first';
   const translate = (label, path = 'english') => gemini ? [label, () => startStage(path)] : null;
   let kind = 'ok', text, go = null, alt = null;
-  if (working) {
-    kind = 'busy'; text = working.message || 'Working…';
-    go = ['Stop', () => act('stop', { stage: 'english' })];
-  } else if (english && current.youtube_missing && !current.english_stale) {
+  if (english && current.youtube_missing && !current.english_stale) {
     kind = 'stale'; text = 'This summary was made before YouTube titles and descriptions'; go = translate('Update English & summary');
   } else if (english && stale) {
     kind = 'stale'; text = 'You fixed words since the English was made'; go = translate('Update English & summary');
@@ -543,38 +742,147 @@ function updateDock() {
   } else {
     kind = ''; text = fixed; go = translate('Translate & summarise →');
   }
-  if (!working && failed && failed.message) { kind = 'stale'; text = failed.message; }
-  if (!working && stageNotice) { kind = 'stale'; text = stageNotice; }
-  if (caps && !gemini && !working && !english) text = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate, set GEMINI_API_KEY and restart the app (see the README).';
-  dock.className = `dock${kind ? ` ${kind}` : ''}`;
-  $('dock-note').textContent = text;
-  const track = $('dock-track'), progress = working ? working.progress : null;
-  track.hidden = !working; track.classList.toggle('indeterminate', Boolean(working) && progress == null);
-  $('dock-fill').style.width = working && progress != null ? `${progress}%` : '';
-  dockAction = go && go[1]; dockAltAction = alt && alt[1];
-  $('dock-go').hidden = !go; $('dock-go').textContent = go ? go[0] : '';
-  $('dock-alt').hidden = !alt; $('dock-alt').textContent = alt ? alt[0] : '';
-  // Say where the text goes whenever a button here would start Gemini.
-  $('llm-note').hidden = working || !gemini || ![go, alt].some(button => button && /Translate|Update|Run again|summary$|subtitles/.test(button[0]));
+  if (failed && failed.message) { kind = 'stale'; text = failed.message; }
+  if (stageNotice) { kind = 'stale'; text = stageNotice; }
+  if (caps && !gemini && !english) text = HOSTED ? 'Translation and summaries are not enabled on this site.' : 'To translate, set GEMINI_API_KEY and restart the app (see the README).';
+  return { kind, text, go, alt, gemini };
 }
+function updateDock() {
+  const wrap = $('dock-wrap'), dock = $('dock'), list = activities();
+  const idle = page === 'run' && Boolean(current);  // a finished transcript on screen: its English, or else its next step
+  const live = idle ? list.find(item => item.id === jobId && item.group === 'english') : list.find(item => item.id === jobId) || list[0];
+  const step = !live && idle ? nextStep() : null;
+  wrap.hidden = !live && !step;
+  if (wrap.hidden) { islandOpen = false; islandKey = ''; islandParts = null; return; }
+  const groups = new Set(live ? [`${live.id}:${live.group}`] : []);
+  const others = list.filter(item => { const group = `${item.id}:${item.group}`; if (groups.has(group)) return false; groups.add(group); return true; });
+  const dots = others.length > 2 ? others.slice(0, 1) : others;  // circles for the other things running: two, or one and a count
+  const mine = item => live && item.id === live.id && item.group === live.group;  // expanded, the pill's own steps come first
+  const rows = islandOpen ? [...list.filter(mine), ...list.filter(item => !mine(item))] : [];
+  dock.className = `dock${live ? ' live' : step.kind ? ` ${step.kind}` : ''}${islandOpen ? ' expanded' : ''}`;
+  const go = step && step.go, alt = step && step.alt;
+  dockAction = go && go[1]; dockAltAction = alt && alt[1];
+  $('dock-go').hidden = !go; put($('dock-go'), go ? go[0] : '');
+  $('dock-alt').hidden = !alt; put($('dock-alt'), alt ? alt[0] : '');
+  // Say where the text goes whenever a button here would start Gemini.
+  $('llm-note').hidden = !step || !step.gemini || ![go, alt].some(button => button && /Translate|Update|Run again|summary$|subtitles/.test(button[0]));
+  $('island-tap').setAttribute('aria-expanded', String(islandOpen));
+  // Redraw rings, circles and rows only when what is running changes. Progress only moves them, so a button you are
+  // on or pressing stays where it is.
+  const ident = item => [item.id, item.group, item.icon];
+  const key = JSON.stringify([islandOpen, live && ident(live), Boolean(step), dots.map(ident), others.length, rows.map(item => [...ident(item), item.stop && item.stop[0]])]);
+  if (key !== islandKey) { islandKey = key; drawIsland(live, step, dots, others.length, rows); }
+  const parts = islandParts;
+  if (live) setRing(parts.icon, live.percent, live.waiting);
+  put($('dock-note'), live ? live.label : step.text);
+  put($('island-pct'), live && live.percent != null ? `${live.percent}%` : '');
+  $('island-tap').title = live ? `${live.label} · ${live.sub}` : step.text;
+  dots.forEach((item, index) => {
+    const { dot, box } = parts.dots[index], here = item.id === jobId && page === (item.id ? 'run' : 'home');
+    setRing(box, item.percent, item.waiting);
+    dot.title = `${item.label}${item.percent != null ? ` ${item.percent}%` : ''} · ${item.sub}`;
+    dot.setAttribute('aria-label', `${dot.title}${here ? '' : ' · open'}`);
+  });
+  if (parts.text) put(parts.text, step.text);
+  rows.forEach((item, index) => {
+    const row = parts.rows[index];
+    setRing(row.box, item.percent, item.waiting);
+    put(row.label, item.label); put(row.sub, item.sub); put(row.pct, item.percent != null ? `${item.percent}%` : '');
+    if (row.button) row.button.setAttribute('aria-label', `${item.stop[0]} · ${item.label} · ${item.sub}`);
+  });
+}
+// Builds the pill's rings, circles and (expanded) rows; updateDock fills in their progress and text.
+function drawIsland(live, step, dots, count, rows) {
+  const parts = islandParts = { icon: live ? ring(live.icon) : null, dots: [], rows: [], text: null };
+  $('island-icon').hidden = !live;
+  $('island-icon').replaceChildren(...(live ? [parts.icon] : []));
+  $('island-dots').hidden = islandOpen || !count;
+  $('island-dots').replaceChildren(...dots.map(item => {
+    const dot = el('button', 'island-dot'), box = ring(item.icon); dot.type = 'button';
+    dot.append(box);
+    dot.onclick = () => { if (item.id === jobId && page === (item.id ? 'run' : 'home')) setIsland(true); else select(item.id); };
+    parts.dots.push({ dot, box });
+    return dot;
+  }), ...(count > 2 ? [moreDot(count - 1)] : []));
+  // Expanded: what is running (or the next step in full), each with its own Stop, and a "?" for the icons.
+  const more = $('island-more');
+  more.hidden = !islandOpen;
+  if (!islandOpen) { more.replaceChildren(); return; }
+  const head = el('div', 'island-head'), help = el('button', 'island-help', '?');
+  help.type = 'button'; help.title = 'What the icons mean'; help.setAttribute('aria-label', 'What the icons mean');
+  help.onclick = () => { setIsland(false); openPop('info', 'legend'); };
+  head.append(el('p', 'island-title', live ? 'Running now' : 'Next step'), help);
+  const nodes = [head];
+  if (step) nodes.push(parts.text = el('p', 'island-text'));
+  if (step && rows.length) nodes.push(el('p', 'island-title', 'Running now'));
+  for (const item of rows) { const row = islandRow(item); parts.rows.push(row); nodes.push(row.node); }
+  more.replaceChildren(...nodes);
+}
+function moreDot(count) {
+  const dot = el('button', 'island-dot more', `+${count}`); dot.type = 'button';
+  dot.title = `${count} more running`; dot.setAttribute('aria-label', `${count} more running · show all`);
+  dot.onclick = () => setIsland(true);
+  return dot;
+}
+function islandRow(item) {
+  const node = el('div', 'island-item'), text = el('span', 'island-row-text');
+  const row = { node, box: ring(item.icon), label: el('span', 'island-label'), sub: el('span', 'island-sub'), pct: el('span', 'island-pct'), button: null };
+  text.append(row.label, row.sub);
+  node.append(row.box, text, row.pct);
+  if (item.stop) {
+    const button = row.button = el('button', 'btn btn-ghost btn-sm', item.stop[0]); button.type = 'button';
+    button.onclick = () => { button.disabled = true; Promise.resolve(item.stop[1]()).finally(() => { button.disabled = false; }); };
+    node.append(button);
+  }
+  return row;
+}
+function setIsland(open) {
+  if (islandOpen === open) return;
+  islandOpen = open; updateDock();
+}
+$('island-tap').addEventListener('click', () => setIsland(!islandOpen));
 $('dock-go').addEventListener('click', () => { if (dockAction) dockAction(); });
 $('dock-alt').addEventListener('click', () => { if (dockAltAction) dockAltAction(); });
+// A step shows as starting the moment you click; if the server says no, it goes back to how it was.
 async function startStage(path, body) {
   if (!current) return;
-  const gujlish = path === 'gujlish';
+  const id = jobId, job = current, gujlish = path === 'gujlish', keys = STAGES_OF[path];
+  const run = runs.find(item => item.id === id), buttons = ['dock-go', 'dock-alt', 'gujlish-button', 'gujlish-alt'];
   if (gujlish) gujlishNotice = ''; else stageNotice = '';
-  for (const id of ['dock-go', 'dock-alt', 'gujlish-button', 'gujlish-alt']) $(id).disabled = true;
+  const before = keys.map(key => [key, job[key], run && run[key]]);
+  for (const key of keys) {
+    const state = { status: 'queued', progress: null, message: 'Starting…' };
+    job[key] = { ...state }; if (run) run[key] = { ...state };
+    starting.set(`${id}:${key}`, state);
+  }
+  for (const button of buttons) $(button).disabled = true;
+  renderRuns(); updateGujlishBar(); updateDock();
+  let failure = '';
   try {
-    const response = await postJson(`/api/jobs/${jobId}/${path}`, body);
+    const response = await postJson(`/api/jobs/${id}/${path}`, body);
     if (signedOut(response)) return;
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) { if (gujlish) gujlishNotice = data.error || 'Could not start this step.'; else stageNotice = data.error || 'Could not start this step.'; return; }
-    pollFailures = 0; poll(); loadRuns();
-  } catch { if (gujlish) gujlishNotice = `Could not reach ${SERVER}.`; else stageNotice = `Could not reach ${SERVER}.`; }
+    if (!response.ok) failure = data.error || 'Could not start this step.';
+    else { pollFailures = 0; await Promise.all([poll(), loadRuns()]); }
+  } catch { failure = `Could not reach ${SERVER}.`; }
   finally {
-    for (const id of ['dock-go', 'dock-alt', 'gujlish-button', 'gujlish-alt']) $(id).disabled = false;
-    if (current) { updateGujlishBar(); updateDock(); }
+    for (const key of keys) starting.delete(`${id}:${key}`);
+    for (const button of buttons) $(button).disabled = false;
+    if (current) updateGujlishBar();
+    updateDock();  // Stop can show now
   }
+  if (!failure) return;
+  // Put back how it was, on these objects and on any newer copies a poll or list refresh brought in meanwhile.
+  const now = runs.find(item => item.id === id), shownNow = current && current.id === id ? current : null;
+  for (const [key, jobState, runState] of before) {
+    job[key] = jobState; if (run) run[key] = runState;
+    if (shownNow && shownNow !== job) shownNow[key] = jobState;
+    if (now && now !== run) now[key] = runState;
+  }
+  if (gujlish) gujlishNotice = failure; else stageNotice = failure;
+  logActivity('fail', `Couldn’t start ${STEP_NAMES[keys[0]]} · “${job.name || (run && run.name) || 'this talk'}”`, id);
+  renderRuns();
+  if (current) updateGujlishBar();
 }
 
 // ---- Copying and the export menu ----
@@ -605,13 +913,48 @@ function updateExports() {
     }));
   }
 }
-function openExport() { $('export').hidden = false; $('export-btn').setAttribute('aria-expanded', 'true'); $('export-close').focus(); }
-function closeExport() { $('export').hidden = true; $('export-btn').setAttribute('aria-expanded', 'false'); }
-$('export-btn').addEventListener('click', () => { if ($('export').hidden) openExport(); else closeExport(); });
-$('export-close').addEventListener('click', closeExport);
+
+// ---- Popovers from the top bar: Export, Details (with the icon legend) and Activity; one open at a time ----
+const POPS = { export: 'export-btn', activity: 'bell-btn', info: 'info-btn' };
+function openPop(name, scrollTo) {
+  for (const other of Object.keys(POPS)) if (other !== name) closePop(other);
+  if (name === 'info') renderInfo();
+  if (name === 'activity') renderActivity(true);
+  $(name).hidden = false; $(POPS[name]).setAttribute('aria-expanded', 'true');
+  if (scrollTo) $(scrollTo).scrollIntoView({ block: 'nearest' });
+  $(name).querySelector('.pop-close').focus({ preventScroll: Boolean(scrollTo) });
+}
+function closePop(name) { $(name).hidden = true; $(POPS[name]).setAttribute('aria-expanded', 'false'); }
+function closePops() { for (const name of Object.keys(POPS)) closePop(name); }
+function togglePop(name) { if ($(name).hidden) openPop(name); else closePop(name); }
+function openExport() { openPop('export'); }
+for (const [name, button] of Object.entries(POPS)) $(button).addEventListener('click', () => togglePop(name));
+for (const button of document.querySelectorAll('.pop-close')) {
+  button.addEventListener('click', () => { const pop = button.closest('.pop'); closePop(pop.id); $(POPS[pop.id]).focus(); });
+}
+// A click elsewhere closes an open popover and folds the pill back. The click's path is read as it was when clicked,
+// since the pill may redraw what was clicked.
 document.addEventListener('click', e => {
-  if (!$('export').hidden && !e.target.closest('#export') && !e.target.closest('#export-btn') && !e.target.closest('#dock')) closeExport();
+  const path = e.composedPath();
+  for (const [name, button] of Object.entries(POPS)) {
+    if (!$(name).hidden && !path.includes($(name)) && !path.includes($(button)) && !path.includes($('island'))) closePop(name);
+  }
+  if (islandOpen && !path.includes($('island'))) setIsland(false);
 });
+// Details: this talk's models and the summary's Source note, the workspace, and what the pill's icons mean.
+function renderInfo() {
+  const job = jobId && (shown || runs.find(run => run.id === jobId));
+  $('info-talk').hidden = !job;
+  if (!job) return;
+  const rows = [];
+  if (job.model) rows.push(['Transcribed with', job.model[0].toUpperCase() + job.model.slice(1)]);
+  const script = job.mode === 'native' ? 'Everything in Gujarati script' : job.mode === 'mixed' ? 'English words in English letters' : '';
+  if (script) rows.push(['Script', script]);
+  const made = sourceLine.match(/English translation by (.+?); summary by (.+?)\.(\s|$)/);
+  if (made) rows.push(['English by', made[1]], ['Summary by', made[2]]);
+  $('info-list').replaceChildren(...rows.flatMap(([term, value]) => [el('dt', '', term), el('dd', '', value)]));
+  $('info-source').textContent = sourceLine; $('info-source').hidden = !sourceLine;
+}
 // A time in the summary opens that line of the talk.
 $('summary').addEventListener('click', e => {
   const chip = e.target.closest('.time-chip');
@@ -625,18 +968,38 @@ $('summary').addEventListener('click', e => {
 });
 
 // ---- Pause, resume, cancel and delete ----
-async function act(path, body, id = jobId) {
+async function act(path, body, id = jobId, button = null) {
+  if (button) button.disabled = true;
+  if (id === jobId && (path === 'pause' || path === 'resume')) {
+    $('run-state').textContent = path === 'pause' ? 'Pausing…' : 'Resuming…'; $('run-state').className = 'status-pill busy';
+  }
+  // Note a stop before asking for it, so a step that ends while the request is out is logged as stopped, not finished.
+  const asked = path !== 'stop' ? [] : (body.stage === 'gujlish' ? ['gujlish'] : STAGES_OF.english)
+    .map(key => `${id}:${key}`).filter(key => !stopAsked.has(key));
+  for (const key of asked) stopAsked.add(key);
+  const failed = message => {
+    for (const key of asked) stopAsked.delete(key);
+    if (!message) return false;
+    notice(message);
+    // The notice shows only on that talk's page; anywhere else, the activity log keeps it.
+    if (page !== 'run' || id !== jobId) logActivity('fail', `Couldn’t ${path} “${(runs.find(run => run.id === id) || {}).name || 'a talk'}” · ${message}`, id);
+    return false;
+  };
   try {
     const response = await postJson(`/api/jobs/${id}/${path}`, body);
-    if (signedOut(response)) return false;
+    if (signedOut(response)) return failed('');
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) { notice(data.error || 'That did not work. Try again.'); return false; }
+    if (!response.ok) return failed(data.error || 'That did not work. Try again.');
     return true;
-  } catch { notice(`Could not reach ${SERVER}.`); return false; }
-  finally { if (jobId === id && path !== 'delete') { pollFailures = 0; poll(); } loadRuns(); }
+  } catch { return failed(`Could not reach ${SERVER}.`); }
+  finally {
+    if (button) button.disabled = false;
+    if (jobId === id && path !== 'delete') { pollFailures = 0; poll(); }
+    loadRuns();
+  }
 }
-$('pause-button').addEventListener('click', () => act('pause'));
-$('resume-button').addEventListener('click', () => act('resume'));
+$('pause-button').addEventListener('click', () => act('pause', null, jobId, $('pause-button')));
+$('resume-button').addEventListener('click', () => act('resume', null, jobId, $('resume-button')));
 $('delete-button').addEventListener('click', async () => {
   const job = shown || runs.find(run => run.id === jobId);
   if (!job) return;
@@ -647,7 +1010,10 @@ $('delete-button').addEventListener('click', async () => {
     [{ label: finished ? 'Delete' : 'Cancel recording', value: true, kind: 'btn-accent danger' }, { label: 'Keep it', value: false }]);
   if (!yes) return;
   const id = jobId;
-  if (await act('delete')) { runs = runs.filter(run => run.id !== id); if (jobId === id) select(null); }
+  if (await act('delete', null, id, $('delete-button'))) {
+    logActivity('info', `${finished ? 'Deleted' : 'Cancelled'} “${job.name}”`);
+    runs = runs.filter(run => run.id !== id); if (jobId === id) select(null);
+  }
 });
 
 // ---- Adding a recording: it uploads as soon as it is dropped or chosen, and carries on while you look at others ----
@@ -666,14 +1032,26 @@ window.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Fi
 window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; dragging(false); } });
 window.addEventListener('drop', e => { if (!e.dataTransfer.files.length) return; e.preventDefault(); dragDepth = 0; dragging(false); addRecording(e.dataTransfer.files[0]); });
 
+const uploadChanged = () => { renderBusy(); updateDock(); };
+async function cancelUpload() {
+  const mine = upload;
+  if (!mine) return;
+  if (!mine.error && !await ask('Cancel this upload?', `“${mine.name}” stops uploading and is not transcribed.`,
+    [{ label: 'Cancel upload', value: true, kind: 'btn-accent danger' }, { label: 'Keep uploading', value: false }])) return;
+  if (upload !== mine) return;
+  mine.controller.abort(); upload = null;
+  if (!mine.error) logActivity('info', `Upload cancelled · “${mine.name}”`);
+  uploadChanged();
+}
 async function fingerprintOf(file) {  // SHA-256 of the file, as web/recordings.py computes it; null if unavailable
   try {
     const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
     return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
   } catch { return null; }
 }
-async function uploadInPieces(file, signal) {
+async function uploadInPieces(file, mine) {
   // Sent in pieces because hosting platforms cap the size of one request; offsets make a resent piece harmless.
+  const signal = mine.controller.signal;
   const started = await fetch('/api/uploads', { method: 'POST', signal });
   if (signedOut(started)) return null;
   if (!started.ok) throw new Error('Could not start the upload.');
@@ -690,8 +1068,8 @@ async function uploadInPieces(file, signal) {
     if (response.status === 409 && Number.isInteger(data.received)) { offset = data.received; continue; }
     if (!response.ok) throw new Error(data.error || 'Upload failed. Please try again.');
     offset = data.received;
-    upload.percent = Math.round(offset / file.size * 100);
-    renderBusy();
+    mine.percent = Math.round(offset / file.size * 100);
+    uploadChanged();
   }
   return id;
 }
@@ -699,55 +1077,71 @@ async function addRecording(file) {
   if (upload && !upload.error) return ask('One upload at a time', `“${upload.name}” is still uploading. Add this one when it has finished.`, [{ label: 'OK', value: true, kind: 'btn-accent' }]);
   if (file.size > MAX_UPLOAD_MB * 1024 * 1024) return ask('This file is too large', `Files up to ${MAX_UPLOAD_MB} MB can be added here.`, [{ label: 'OK', value: true, kind: 'btn-accent' }]);
   if (page !== 'home') select(null);
+  // The card shows from the moment of the drop: Reading → Checking → Uploading % → Starting.
+  const controller = new AbortController();
+  upload = { name: file.name, size: file.size, phase: 'reading', percent: 0, error: '', controller };
+  const mine = upload, alive = () => upload === mine;
+  logActivity('start', `Upload started · “${file.name}”`);
+  uploadChanged(); loadRuns();
   // The server knows recordings by a fingerprint of their audio, so a renamed copy is recognised too, and audio it
   // already has is never uploaded again.
-  $('well-title').textContent = 'Checking whether you already have it…';
   const print = await fingerprintOf(file);
+  if (!alive()) return;
+  mine.phase = 'checking'; uploadChanged();
   let known = { stored: false, runs: [] };
   try {
-    const response = print ? await fetch(`/api/recordings/${print}`) : null;
+    const response = print ? await fetch(`/api/recordings/${print}`, { signal: controller.signal }) : null;
     if (response && signedOut(response)) return;
     if (response && response.ok) known = await response.json();
   } catch { /* checking is optional: upload as usual */ }
-  finally { $('well-title').textContent = 'Drop audio or video here'; }
+  if (!alive()) return;
   const same = known.runs[0];
   if (same) {
+    await modalClosed();  // "Cancel this upload?" may still be open
+    if (!alive()) return;
+    upload = null; uploadChanged();  // nothing runs while you decide, so the page stops checking for news
     const others = known.runs.length > 1 ? ` (and ${known.runs.length - 1} more)` : '';
     const choice = await ask('You already have this recording',
       `“${same.name}”${same.started ? `, added ${when(same.started)},` : ''}${others} has exactly the same audio.`,
       [{ label: 'Open it', value: 'open', kind: 'btn-accent' }, { label: 'Transcribe again', value: 'again' }, { label: 'Cancel', value: null }]);
-    if (choice === 'open') { select(same.id); return; }
-    if (choice !== 'again') return;
+    if (choice !== 'again') {
+      logActivity('info', `Not uploaded · you already have “${same.name}”`, same.id);
+      if (choice === 'open') select(same.id);
+      return;
+    }
+    if (upload) { logActivity('info', `Not uploaded · “${upload.name}” started first`); return; }  // added meanwhile
+    upload = mine; uploadChanged(); loadRuns();
   }
   const form = new FormData(); form.append('model', $('model').value); form.append('mode', $('mode').value); form.append('name', file.name);
-  upload = { name: file.name, size: file.size, percent: 0, error: '', controller: new AbortController() };
-  const mine = upload;
-  renderBusy(); loadRuns();
-  const start = () => fetch('/api/jobs', { method: 'POST', body: form, signal: mine.controller.signal });
+  const start = () => fetch('/api/jobs', { method: 'POST', body: form, signal: controller.signal });
   try {
     let response = null;
     if (known.stored) {  // the server has this audio already: start straight away
-      form.append('fingerprint', print); mine.checking = true; renderBusy();
+      form.append('fingerprint', print); mine.stored = true; mine.phase = 'starting'; uploadChanged();
       response = await start();
       if (signedOut(response)) return;
-      if (response.status === 409) { form.delete('fingerprint'); mine.checking = false; response = null; }  // gone since
+      if (response.status === 409) { form.delete('fingerprint'); mine.stored = false; response = null; }  // gone since
     }
     if (!response) {
-      const uploadId = await uploadInPieces(file, mine.controller.signal);
+      mine.phase = 'uploading'; mine.percent = 0; uploadChanged();
+      const uploadId = await uploadInPieces(file, mine);
       if (!uploadId) return;
       form.append('upload_id', uploadId);
-      mine.checking = true; renderBusy();
+      mine.phase = 'starting'; uploadChanged();
       response = await start();
       if (signedOut(response)) return;
     }
     const data = await response.json().catch(() => ({}));
     if (response.status !== 202) throw new Error(data.error || 'Upload failed. Please try again.');
-    upload = null;
+    if (alive()) upload = null;
+    logActivity('done', `Upload finished · “${file.name}”`, data.id || null);
+    uploadChanged();
     await loadRuns();
   } catch (error) {
-    if (mine.controller.signal.aborted || upload !== mine) return;
-    upload.error = error.message || `Could not connect to ${SERVER}.`; upload.checking = false;
-    renderBusy();
+    if (controller.signal.aborted || !alive()) return;
+    upload.error = error.message || `Could not connect to ${SERVER}.`;
+    logActivity('fail', `Upload failed · “${file.name}”`);
+    uploadChanged();
   }
 }
 
@@ -909,9 +1303,12 @@ function describeEdit() {
 $('ed-latin').addEventListener('input', () => { touched.latin = true; describeEdit(); suggest('gu'); });
 $('ed-gu').addEventListener('input', () => { touched.gu = true; $('ed-suggest').replaceChildren(); describeEdit(); suggest('latin'); });
 $('editor').addEventListener('submit', e => { e.preventDefault(); saveEdit(); });
+// Escape closes an open popover, else folds the pill, else closes the fixer. An open dialog handles its own.
 document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape') return;
-  if (!$('export').hidden) { closeExport(); $('export-btn').focus(); }
+  if (e.key !== 'Escape' || $('modal').open) return;
+  const open = Object.keys(POPS).find(name => !$(name).hidden);
+  if (open) { closePop(open); $(POPS[open]).focus(); }
+  else if (islandOpen) { setIsland(false); $('island-tap').focus(); }
   else if (sel) closeEditor(true);
 });
 async function saveEdit() {
@@ -1000,7 +1397,14 @@ window.addEventListener('focus', welcomeBack);
 for (const type of ['pointerdown', 'keydown']) {
   document.addEventListener(type, () => { lastActivity = Date.now(); if (napping) welcomeBack(); }, { passive: true });
 }
+$('legend-list').replaceChildren(...LEGEND.map(([icon, text]) => {
+  const item = el('li'), mark = el('i'); mark.innerHTML = ICONS[icon];
+  item.append(mark, el('span', '', text));
+  return item;
+}));
+renderActivity();
 describeOptions();
 loadUsage();
 loadDictionary();
-loadRuns().then(() => { const saved = sessionStorage.getItem('asr-job'); if (saved && runs.some(run => run.id === saved)) select(saved); });
+// Steps already running or finished when the page opens are not news: the log starts with what changes from here.
+loadRuns().then(() => { logReady = true; const saved = sessionStorage.getItem('asr-job'); if (saved && runs.some(run => run.id === saved)) select(saved); });
