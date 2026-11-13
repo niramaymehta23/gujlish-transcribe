@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.helpers import DeferredExecutor
+from tests.helpers import DeferredExecutor, background_check_done, wait_for_background_check
 from tests.test_web_gpu_jobs import EXECUTION, FakeJobs
 from transcriber.english.captions import english_key
 from web.server import CATALOGUE_FILE, CATALOGUE_VERSION, RUN_FILE, ViewCache, create_app
@@ -133,7 +133,7 @@ class CatalogueBase(unittest.TestCase):
         self.executor = DeferredExecutor()
         self.app = create_app(executor=self.executor, settings=self.settings, gpu_jobs=gpu_jobs)
         self.app.config["SESSION_COOKIE_SECURE"] = False  # the test client uses plain http
-        self.addCleanup(self.join_reconcile, self.app)
+        wait_for_background_check(self, self.app)
         self.client = self.browser(VISITOR)
         return self.app
 
@@ -144,10 +144,7 @@ class CatalogueBase(unittest.TestCase):
         return client
 
     def join_reconcile(self, app=None):
-        thread = (app or self.app).extensions["asr_reconcile"]
-        if thread:
-            thread.join(10)
-            self.assertFalse(thread.is_alive())
+        self.assertTrue(background_check_done(app or self.app))
 
     def add_talk(self, number, *, stages=(), visitor=VISITOR, finished=True, meta=None, run=None, suggestion=False):
         """A run folder as the site leaves it: its RUN_FILE and owner, the transcript, and the outputs of `stages`."""
