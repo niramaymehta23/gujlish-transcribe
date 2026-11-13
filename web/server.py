@@ -11,6 +11,7 @@ cache, so opening the talk list or a finished talk touches no files."""
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -34,7 +35,7 @@ from flask import Flask, abort, g, jsonify, redirect, render_template, request, 
 
 import transcriber.files.storage as storage
 from transcriber.english.captions import captions_current, captions_srt
-from transcriber.english.llm import gemini_available
+from transcriber.english.llm import LLMError, gemini_available
 from transcriber.english.summarize import UNTITLED
 from transcriber.english.youtube import shorten
 from transcriber.files.storage import ROOT, new_run, run_paths, stage_paths
@@ -56,12 +57,14 @@ from transcriber.speech.dictionary import load as load_dictionary
 from transcriber.speech.dictionary import save as save_dictionary
 from transcriber.speech.edits import load_gujlish, matches, replace_words, save_transcript
 from transcriber.speech.gujlish import KnownWordsOnly, Transliterator, XlitEngine, write_gujlish, xlit_installed
-from transcriber.speech.postprocess import drop_cut_stop
 from web import usage
 from web.cloudjobs import CloudRunJobs, RemoteRun, run_remote
 from web.documents import markdown_docx, transcript_docx
 from web.recordings import FINGERPRINT, fingerprint, fingerprints
 from web.recordings import find as find_recording
+from web.search import service as search_service
+from web.search.gemini import Embedder
+from web.search.gemini import answer as answer_question
 from web.settings import Settings
 
 LOG_TAIL_LINES = 12  # recent subprocess output kept for error messages
@@ -85,6 +88,9 @@ CATALOGUE_FIELDS += ("sha256", "started")
 TITLE_LIMIT = 120  # characters in a talk's name
 # Characters of finished talks' files kept in memory; parsed, they take about twice that in bytes (Nov 2026 talks).
 VIEW_CACHE_CHARS = 64 * 1024**2
+SEARCH_LIMIT = 500  # characters in a search or a question
+MOMENT_SECONDS = 30  # audio played for a search result when the page names no end
+MOMENT_LIMIT = 45  # and never more
 STOPPED = "Stopped. Start it again to continue where it left off."
 GPU_LIMIT_MESSAGE = (
     "This month's GPU limit ({hours:g} hours) is used up, so no new transcriptions can start. "
@@ -423,16 +429,9 @@ def talk_files(job: dict, made) -> dict:
         files["translation_text"] = text(paths["translation_txt"])
         english = optional(paths["translation_json"])
         if english is not None:
-            english = json.loads(english).get("segments", [])
-            # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
-            current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
-            # The page shows each line's English under it. Only segments with text were translated, in order, and a
-            # sample translation stops early: the others get None.
-            lines = iter(s.get("text", "") for s in english)
-            files["english"] = {
-                "english_stale": [s.get("source") for s in english] != current,
-                "english_segments": [next(lines, None) if s.get("text", "").strip() else None for s in segments],
-            }
+            # The page shows each line's English under it (None where there is none).
+            lines, stale = search_service.english_lines(segments, json.loads(english).get("segments", []))
+            files["english"] = {"english_stale": stale, "english_segments": lines}
         files["captions_current"] = "captions" in made and captions_current(transcript_json)
         files["cacheable"] &= "captions" not in made or files["captions_current"]
     if "summary" in made:
@@ -469,7 +468,10 @@ def transcript_view(files: dict, state: dict) -> dict:
     return view
 
 
-def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None) -> Flask:
+def create_app(
+    *, executor=None, settings: Settings | None = None, gpu_jobs=None, embedder=None, answer_llm=None
+) -> Flask:
+    """`embedder` and `answer_llm` stand in for Gemini in search (tests); otherwise Gemini is used where allowed."""
     settings = settings or Settings.from_env()
     # Hosted with a GPU job: transcription runs there and this website needs no GPU (web/cloudjobs.py).
     if gpu_jobs is None and settings.gpu_job:
@@ -516,6 +518,46 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     saving = {"dirty": False, "writing": False}
     outputs_lock = Lock()  # one run's stage outputs checked and noted at a time (note_outputs)
     views = ViewCache(VIEW_CACHE_CHARS)
+
+    # Search across all talks (web/search). The hooks below only queue work: a worker thread reads the files.
+    def search_names(job: dict) -> dict:
+        return {"given": job.get("title") or "", "auto": job.get("auto_title") or "", "file": job.get("name") or ""}
+
+    def search_job(talk: str) -> dict | None:
+        """A copy of the record of a talk with a transcript, or None. (Its status is not asked: a transcript is taken
+        in before its run is marked complete.)"""
+        with lock:
+            job = jobs.get(talk)
+            return dict(job) if job and job.get("json") else None
+
+    def search_talks() -> dict:
+        finished = [job for job in all_runs() if job.get("json")]
+        with lock:
+            return {job["id"]: search_names(job) for job in finished}
+
+    def search_talk_names(talk: str) -> dict | None:
+        job = search_job(talk)
+        return search_names(job) if job else None
+
+    def search_read(talk: str):
+        job = search_job(talk)
+        return search_service.read_talk(Path(job["json"]), search_names(job)) if job else None
+
+    def search_stamp(talk: str) -> str | None:
+        job = search_job(talk)
+        return search_service.talk_stamp(Path(job["json"])) if job else None
+
+    searcher = search_service.SearchService(
+        folder=transcripts.parent / ".search",  # beside the transcripts folder, in the same storage
+        talks=search_talks,
+        names=search_talk_names,
+        read=search_read,
+        stamp=search_stamp,
+        embedder=embedder if embedder is not None else Embedder(),
+        meaning=(lambda: True) if embedder is not None else (lambda: gemini_ready()),
+        trusted=trusted,
+    )
+    app.extensions["asr_search"] = searcher
     app.extensions["asr_jobs"] = jobs
     app.extensions["asr_settings"] = settings
     app.extensions["asr_reconcile"] = None  # the thread checking the catalogue against the folders after a start
@@ -679,6 +721,8 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 return False
             before = (job.get("title"), job.get("unsettled"))
             job["title"] = given_title(meta)
+            if job["title"] != before[0]:
+                searcher.rename(job["id"])
             if trusted:
                 job["unsettled"] = unsettled(meta, job.get("status"))
             return trusted and (job.get("title"), job.get("unsettled")) != before
@@ -812,6 +856,8 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 continue
             with lock:
                 added = str(run_dir) not in deleted and jobs.setdefault(job_id, record) is record
+            if added and record["status"] == "complete":
+                searcher.touch(job_id)
             if added and record["unsettled"]:
                 resume_run(run_dir)  # nobody could see it until now, so nothing else can be doing its work
         with lock:
@@ -824,6 +870,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     del jobs[job["id"]]
         for job in gone:
             views.forget(job["run_dir"])
+            searcher.forget(job["id"])
         save_catalogue()
 
     def refresh(job: dict, run_dir: Path) -> None:
@@ -838,9 +885,13 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             meta = read_meta(run_dir)
             if meta:  # else unreadable for now: keep what the catalogue knows
                 with lock:
+                    renamed = job.get("title") != given_title(meta)
                     job["title"] = given_title(meta)
+                if renamed:
+                    searcher.rename(job["id"])
         if job["status"] == "complete" and note_outputs(job)[1]:
             views.forget(job["run_dir"])
+            searcher.touch(job["id"])
             name_from_summary(job)
         if settled and unsettled(meta, job["status"]):
             with lock:
@@ -874,6 +925,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         files. Returns the outputs."""
         made = note_outputs(job)[0]
         views.forget(job["run_dir"])
+        searcher.touch(job["id"])
         return made
 
     def name_from_summary(job: dict) -> None:
@@ -882,6 +934,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         title = summary_title(job["json"]) if job.get("json") and output_exists(job, "summary") else None
         with lock:
             job["auto_title"] = title
+        searcher.rename(job["id"])
 
     def drop_meta(run_dir, *keys):
         update_meta(run_dir, lambda meta: [meta.pop(key, None) for key in keys])
@@ -918,6 +971,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                         removed.append(jobs.pop(job_id))
         for job in removed:
             views.forget(job["run_dir"])
+            searcher.forget(job["id"])
         if removed:
             save_catalogue()
         for folder in [*storage.TRANSCRIPTS.glob("*/*/"), *storage.TRANSCRIPTS.glob("*/")]:
@@ -1172,6 +1226,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 resume_work()
             finally:
                 recovered[0] = True
+                searcher.start()  # in the background: restores the saved index and catches up with the talks
 
     def resume_work():
         """Resume the work a restart cut short. Hosted sites also merge duplicate recordings.
@@ -1701,6 +1756,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         for worker in running:
             stop_worker(worker)
         views.forget(job["run_dir"])
+        searcher.forget(job_id)
         save_catalogue()
         Thread(target=remove_run, args=(job, running), daemon=True).start()
         return jsonify(deleted=True)
@@ -1779,6 +1835,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     write_gujlish(transcript_json, data, gujlish, engine)
             finally:
                 views.forget(job["run_dir"])  # also after a write that failed partway
+                searcher.touch(job_id)
             clip = None
             if body.get("remember", True):
                 example = evidence(data, transcript_json, segment, context, start)
@@ -1843,6 +1900,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 save_transcript(transcript_json, data)
             finally:
                 views.forget(job["run_dir"])  # also after a write that failed partway
+                searcher.touch(job_id)
             dictionary = load_dictionary()
             example = evidence(data, transcript_json, segment, segment.get("text", ""), start)
             rule = reject(dictionary, rule_id, example)
@@ -1912,6 +1970,118 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         response.headers["X-Word-Timing"] = "aligned" if exact else "estimated"
         response.headers["Cache-Control"] = "private, max-age=300"
         return response
+
+    @app.get("/api/jobs/<job_id>/moment")
+    def moment_audio(job_id):
+        """A moment of a finished talk, as a short WAV, for a search result's play button: from `start` to `end`
+        seconds, at most MOMENT_LIMIT seconds and never past the talk's end."""
+        with lock:
+            job = dict(find_job(job_id))
+        try:
+            start = float(request.args["start"])
+            end = float(request.args.get("end", start + MOMENT_SECONDS))
+        except (KeyError, ValueError):
+            return jsonify(error="Choose the moment to play."), 400
+        if not (math.isfinite(start) and math.isfinite(end)) or start < 0 or end <= start:
+            return jsonify(error="Choose the moment to play."), 400
+        recording = Path(job.get("source") or "")
+        if job.get("status") != "complete" or not recording.is_file():
+            return jsonify(error="The recording isn't available."), 404
+        end = min(end, start + MOMENT_LIMIT, float(job.get("duration") or math.inf))
+        if end <= start:
+            return jsonify(error="This moment is past the end of the talk."), 400
+        audio = clip_audio(recording, start, end)
+        if audio is None:
+            return jsonify(error="Could not cut this part of the recording."), 500
+        response = send_file(BytesIO(audio), mimetype="audio/wav", download_name="moment.wav")
+        response.headers["Cache-Control"] = "private, max-age=300"
+        return response
+
+    @app.get("/api/search")
+    def search_endpoint():
+        """Talks matching the words typed, best first, each with its best moments. `live=1` while typing (the last
+        word may be unfinished); `meaning=1` also searches by meaning where Gemini is available. Reads no files."""
+        query = request.args.get("q", "")
+        if len(query) > SEARCH_LIMIT:
+            return jsonify(error=f"Keep the search to {SEARCH_LIMIT} characters."), 400
+        found = searcher.search(query, live=request.args.get("live") == "1", meaning=request.args.get("meaning") == "1")
+        talks = []
+        with lock:
+            for talk in found["talks"]:
+                job = jobs.get(talk["talk"])
+                if not job or not job.get("json"):
+                    continue  # deleted meanwhile
+                title, title_from = shown_title(job)
+                hits = [
+                    {
+                        **hit,
+                        "time": search_service.clock(hit["start"]),
+                        "link": search_service.link(job["id"], hit["start"]),
+                    }
+                    for hit in talk["hits"]
+                ]
+                talks.append({
+                    "id": job["id"], "title": title, "title_from": title_from, "name": job.get("name"),
+                    "duration": job.get("duration"), "started": job.get("started"), "name_hit": talk["name_hit"],
+                    "more": talk["more"], "hits": hits,
+                })  # fmt: skip
+        return jsonify(
+            state=found["state"],
+            meaning=found["meaning"],
+            indexing=found["indexing"],
+            total=found["total"],
+            talks=talks,
+        )
+
+    def answers_ready() -> bool:
+        return answer_llm is not None or gemini_ready()
+
+    @app.post("/api/ask")
+    def ask_endpoint():
+        """Answer a question from the talks: the passages that best match it are sent to Gemini, which answers from
+        them alone and cites them; each citation links to its talk and moment."""
+        body = request.get_json(silent=True)
+        question = body.get("question") if isinstance(body, dict) else None
+        question = " ".join(question.split()) if isinstance(question, str) else ""
+        if not question:
+            return jsonify(error="Type a question."), 400
+        if len(question) > SEARCH_LIMIT:
+            return jsonify(error=f"Keep the question to {SEARCH_LIMIT} characters."), 400
+        if not answers_ready():
+            if settings.hosted:
+                return jsonify(error="Questions are not enabled on this site."), 400
+            return jsonify(error="Set GEMINI_API_KEY in the terminal before starting the app (see the README)."), 400
+        passages = searcher.retrieve(question)
+        if passages is None:
+            return jsonify(error="Search is still starting. Try again in a moment."), 503
+        sources = []
+        with lock:
+            for passage in passages:
+                job = jobs.get(passage["talk"])
+                if job:
+                    title = shown_title(job)[0]
+                    sources.append({
+                        **passage, "n": len(sources) + 1, "title": title, "file": job.get("name"),
+                        "name": title or job.get("name") or "", "time": search_service.clock(passage["start"]),
+                    })  # fmt: skip
+        if not sources:
+            return jsonify(answer="Nothing in the talks seems to answer this.", citations=[], model=None, consulted=0)
+        try:
+            result = answer_question(question, sources, make_llm=answer_llm)
+        except LLMError as error:
+            print(f"Could not answer a question ({error}).", flush=True)
+            return jsonify(error="Gemini could not answer just now. Try again in a moment."), 502
+        numbered = {source["n"]: source for source in sources}
+        citations = [
+            {
+                "n": n, "id": source["talk"], "title": source["title"], "name": source["file"], "kind": source["kind"],
+                "label": source["label"], "time": source["time"], "start": source["start"], "seg": source["seg"],
+                "link": search_service.link(source["talk"], source["start"]),
+            }
+            for n in result["cited"]
+            for source in [numbered[n]]
+        ]  # fmt: skip
+        return jsonify(answer=result["answer"], citations=citations, model=result["model"], consulted=len(sources))
 
     @app.get("/api/transliterate")
     def transliterate_text():

@@ -2,6 +2,21 @@
 
 import json
 
+import web.server
+from transcriber.english.llm import LLMError
+from web.search.gemini import Embedder
+
+
+class OfflineEmbedder(Embedder):
+    """What a test site embeds with when the test brings no fake: it never sends text to Google, even when a real
+    GEMINI_API_KEY is set in the shell that runs the tests."""
+
+    def _embed(self, texts, timeout, retries):
+        raise LLMError("Tests never send text to Google")
+
+
+web.server.Embedder = OfflineEmbedder  # every test module that starts the site imports this one
+
 
 class DeferredExecutor:
     def __init__(self):

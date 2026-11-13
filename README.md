@@ -1,9 +1,10 @@
 # HariSena Vaani Studio
 
-Turn Gujarati and Gujarati–English talks into text on your own computer, then into everything you publish: Gujlish, natural spoken English, timed subtitles, a summary, YouTube details and short clips. Transcription runs on your computer; the English, summary and YouTube steps use Google's Gemini (needs your own Gemini API key; see [step 7](#translate-to-english-and-summarize-optional)).
+Turn Gujarati and Gujarati–English talks into text on your own computer, then into everything you publish: Gujlish, natural spoken English, timed subtitles, a summary, YouTube details and short clips. Transcription runs on your computer; the English, summary and YouTube steps use Google's Gemini (needs your own Gemini API key; see [step 8](#translate-to-english-and-summarize-optional)).
 
 - **Mixed-language transcripts.** Gujarati words come out in Gujarati script and English words in English letters, the way people actually speak.
 - **Gujlish too.** The same transcript in Latin letters ("kem cho"), word for word, made on your computer with AI4Bharat's IndicXlit.
+- **Search every talk.** Find words in Gujarati, Gujlish or English, however they are spelled, and jump to the moment they are said; with a Gemini key, also find passages about the same thing and ask questions answered from the talks.
 - **Fix words, and it learns.** Double-click a misheard word, type the right one in Gujarati or Gujlish, and the fix is saved to your dictionary, which corrects every later transcript automatically.
 - **Runs locally.** Transcription happens on your computer and your audio never leaves it. Only if you translate is the transcript *text* sent to Gemini.
 - **Browser app and command line.** Drop a file into the web page, or script it from the terminal.
@@ -17,12 +18,13 @@ Turn Gujarati and Gujarati–English talks into text on your own computer, then 
 3. [Set up Hugging Face (one time)](#set-up-hugging-face-one-time)
 4. [Run the app](#run-the-app)
 5. [Fix words and build your dictionary](#fix-words-and-build-your-dictionary)
-6. [Use the command line](#use-the-command-line)
-7. [Translate to English and summarize (optional)](#translate-to-english-and-summarize-optional)
-8. [Troubleshooting](#troubleshooting)
-9. [Project layout](#project-layout)
-10. [For developers](#for-developers)
-11. [License and credits](#license-and-credits)
+6. [Search every talk](#search-every-talk)
+7. [Use the command line](#use-the-command-line)
+8. [Translate to English and summarize (optional)](#translate-to-english-and-summarize-optional)
+9. [Troubleshooting](#troubleshooting)
+10. [Project layout](#project-layout)
+11. [For developers](#for-developers)
+12. [License and credits](#license-and-credits)
 
 ## What you need
 
@@ -136,6 +138,19 @@ Speech recognition mishears some words, often the same ones every time: names, p
 A word that was misheard once can be the right word somewhere else, so a saved fix **asks** by default. In new transcripts the words it would change are highlighted; double-click one to **Accept** the fix there or choose **Not here, keep as heard**. Press **▶** beside the heard words to hear just that moment of the recording (it works for any words you pick). Both answers are remembered as evidence. For a fix that can never be wrong (a garbled name, say), tick *Fix without asking* or switch it to **Always** in the Dictionary list: those words are replaced straight away and underlined with dots; hover to see what was heard. Fixes made after translating mark the English and summary as out of date; **Update English & summary** in the bottom bar re-translates only the lines you changed.
 
 The **Dictionary** page (top right) shows what you've taught it: **Asks** / **Always** switches a fix between the two, and **×** forgets it. It is stored in `data/dictionary.json` (on a hosted site, in its storage bucket), never uploaded to GitHub. Each fix keeps the words as heard and corrected in Gujarati and Gujlish and, for the latest five times you made or accepted it and the latest five times you rejected it, the sentence, its time and a short audio clip of that stretch in `data/dictionary-clips/`. The app doesn't judge fixes from the clips: in a test on 21 real fixes, the sound alone picked the right word only twice, because most fixes come from knowing the talk, not from how it sounds. That's why you decide, by ear, with ▶. Fixes saved before this version ask until you switch them to Always.
+
+## Search every talk
+
+Click the magnifier at the top (or press `/` anywhere) to search all your talks at once.
+
+- **Find words** searches every talk's name, Gujarati, Gujlish, English and summary as you type. Spelling needn't be exact: *vaat*, *vat* and *વાત* find the same word, and a typo in a longer word still finds it. Talks with all your words come first, each with its best moments and the words marked.
+- **Open a moment.** Click a moment's time to open the talk at that line, lit up, with **▶** to hear 30 seconds from there; **▶** in the results plays it without leaving them. The browser's Back button returns to your results. A moment's link (`#talk=…&t=…`) opens the same place on any device signed in to the same site. The times in a summary open their moments the same way.
+- **Similar meaning** (with a Gemini key): when you stop typing, passages about the same thing are found too, so *service* also finds *seva*. These are marked **Similar meaning**.
+- **Ask a question** (with a Gemini key): Gemini reads the passages that best match your question (at most ten) and answers from them alone, in the language you asked in. Each point is numbered, and the numbers open the moments they came from. The answer model is `gemini-4-hydrogen`, or `gemini-3.8-flash` where that is not offered; set `VAANI_ANSWER_MODEL` to choose another.
+
+**What goes to Google, and what it costs.** Finding words never leaves your computer. Meaning search sends each talk's text once, in passages of about 40 seconds (the Gujarati with its English) and the summary's points, to Google's `gemini-embedding-2`; a passage is sent again only when you change it. What you search for is sent too, once you stop typing. A question sends the question and the passages it is answered from. Audio is never sent. At Google's prices in November 2026, meaning search costs about $0.006 per hour of talk, once, and a question about $0.01. There is no daily limit, so set a spending limit on your key.
+
+**Where it is kept.** The search index is held in memory (about 1.5 to 2 MB per hour of talk) and saved to `data/.search/index.sqlite` a minute after the last change, so a restart opens it without reading every talk again. Each change (a word fix, a new name, a new talk, a finished step, a delete) updates only that talk, and talks changed from the command line are picked up before your next search. Deleting the file is safe: it is rebuilt from the talks, and meaning search sends their text to Google again.
 
 ## Use the command line
 

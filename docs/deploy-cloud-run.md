@@ -26,6 +26,8 @@ This deployment runs **Flex only** (`MODELS="flex"` in `deploy/config.sh`) for t
 | Recordings and results deleted | Never: kept in your bucket until you delete them | `VAANI_RETENTION_HOURS` |
 | One recording transcribed (or waiting) at a time on the whole site | Always | — |
 | Translation and summaries | On when a Gemini key is stored (setup asks for it); Gemini runs on your API key | `VAANI_ALLOW_GEMINI` |
+| Search: finding words | Always | — |
+| Search: similar meaning and questions | With translation: on when a Gemini key is stored | `VAANI_ALLOW_GEMINI` |
 | Large uploads | Sent in 8 MB pieces, because Cloud Run caps one request at 32 MB | — |
 
 The site password is the account: everyone who signs in, on any device, sees, opens, renames and deletes the same talks, and **Sign out** (in Details) asks for the password again. Without a password, anyone with the address can. A browser's signed cookie only keeps a half-sent upload to that browser.
@@ -106,6 +108,17 @@ gcloud run services add-iam-policy-binding gujarati-transcriber --region asia-so
 ## Translation and summaries online
 
 `deploy/setup.sh` asks for a Gemini API key (pressing Enter keeps the one already stored). When a key is stored, `deploy/deploy.sh` gives it to the service from Secret Manager and switches translation on. Keep the site password on, and set a spending limit on the key.
+
+## Search online
+
+Search works the same as on your computer (see the [README](../README.md#search-every-talk)), built so that a search costs the bucket nothing:
+
+- **The index lives in the website's memory**, about 1.5 to 2 MB per hour of talk, twice that for a moment while it is saved. A thousand hours of talks would hold about 2 GB, and briefly twice that while saving, so raise the website's 4 GB well before the library gets that large.
+- **One file in the bucket,** `/data/.search/index.sqlite`, written whole (built on the instance, copied under a temporary name, then renamed) a minute after the last change and at most every ten minutes. A file can't be updated in place in a bucket, so it is never written a piece at a time. A save that fails is tried again later, waiting longer each time (up to half an hour), so a lasting fault doesn't mean a full write every minute.
+- **After a cold start** the website reads that one file, compares it with the talk catalogue, re-reads only talks that differ, and then checks each talk's four files in the background for changes the last save missed. Searches meanwhile answer from what is loaded, and the page says when it is still getting ready. If the file can't be read just then, it tries again shortly rather than rebuilding. A damaged file, or one from another version, is rebuilt from the talks.
+- **Each change updates one talk:** a word fix, a rename, a new talk, a finished step or a delete. Nothing is rebuilt whole.
+- **Costs:** meaning search embeds each passage once with `gemini-embedding-2` (about $0.006 per hour of talk) and each search once you stop typing; a question costs about $0.01 with `gemini-4-hydrogen`. There is no daily limit on questions, so keep the key's spending limit and the budget above.
+- **Logs:** a search's words are part of its address (`/api/search?q=…`), so Cloud Run's request log keeps them like any address. Questions are sent in the request body and are not logged.
 
 ## Known limitations
 
