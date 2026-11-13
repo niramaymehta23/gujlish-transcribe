@@ -99,6 +99,17 @@ GPU_LIMIT_MESSAGE = (
 BUSY_MESSAGE = "A recording is already being transcribed. Pause or cancel it, or wait for it to finish."
 # Direction overrides and isolates: in a name they would turn the text shown after it around.
 BIDI_CONTROLS = frozenset("‪‫‬‭‮⁦⁧⁨⁩")
+# Sent with every response: no framing (clickjacking), no MIME sniffing, and only this site's own scripts, styles,
+# fonts and media (the page has no inline script or style; word and moment audio play from blob: URLs).
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; object-src 'none'; base-uri 'none'; "
+        "form-action 'self'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+}
 
 
 @dataclass(frozen=True)
@@ -314,12 +325,32 @@ def outputs(transcript_json) -> tuple[str, ...]:
     return tuple(key for key in STAGES if stage_output(transcript_json, key).exists())
 
 
+def holds_run(run_dir: Path) -> bool:
+    """Whether a folder holds a run, judged by its file names alone, so that a file which is there but can't be read
+    just now (a passing storage error) still counts: its state file (RUN_FILE), a transcription checkpoint, or a
+    transcript (a .json beside a .txt of the same name). Raises OSError when the folder can't be listed.
+
+    A folder without any of these (an upload whose transcription never started, or what a delete cut short left)
+    names no recording and has nothing to resume."""
+    with os.scandir(run_dir) as entries:
+        names = {entry.name for entry in entries}
+    return (
+        RUN_FILE in names
+        or any(name.endswith(".partial.json") for name in names)
+        or any(name.endswith(".json") and f"{name[:-5]}.txt" in names for name in names)
+    )
+
+
 def leftover(run_dir: Path, cutoff: float) -> bool:
-    """A run folder left by an upload whose transcription never started, made before `cutoff`."""
+    """A run folder made before `cutoff` that holds no run (holds_run): left by an upload whose transcription never
+    started, or by a delete cut short. A folder that can't be listed just now is never taken for one."""
     began = started(run_dir)
     if not began or datetime.fromisoformat(began).timestamp() >= cutoff:
         return False
-    return not read_meta(run_dir) and not any(run_dir.glob(".*.partial.json")) and not find_transcript(run_dir, {})
+    try:
+        return not holds_run(run_dir)
+    except OSError:
+        return False
 
 
 def relative(path, base: Path) -> str | None:
@@ -592,14 +623,22 @@ def create_app(
             session["visitor"] = uuid4().hex
         return hashlib.sha256(session["visitor"].encode()).hexdigest()[:32]
 
-    def run_dirs(root: Path | None = None) -> list[Path]:
+    def run_dirs(root: Path | None = None, strict: bool = False) -> list[Path]:
         """transcripts/<recording>/<model>/<run>/ folders. Listed level by level, so one deleted in the meantime is
-        skipped (Python 3.10's glob fails on it instead)."""
+        skipped (Python 3.10's glob fails on it instead). Any other listing error leaves that folder's runs out, or,
+        when `strict`, raises OSError: for decisions that must not miss a run."""
 
         def folders(parent):
             try:
+                if strict:  # a folder entry that can't be checked raises here too, instead of reading as "no folder"
+                    with os.scandir(parent) as entries:
+                        return [Path(entry.path) for entry in entries if entry.is_dir()]
                 return [path for path in parent.iterdir() if path.is_dir()]
+            except FileNotFoundError:
+                return []
             except OSError:
+                if strict:
+                    raise
                 return []
 
         runs = [
@@ -608,8 +647,17 @@ def create_app(
         return [run for run in runs if str(run) not in deleted]
 
     def load_run(run_dir: Path) -> dict | None:
-        """A job record rebuilt from a run folder: finished, paused, or cut short by a restart."""
-        meta = read_meta(run_dir)
+        """A job record rebuilt from a run folder: finished, paused, or cut short by a restart. None when there is no
+        run, or its RUN_FILE is there but can't be read just now: read without it, a run would lose its name and
+        which stored recording it uses (after a merge), and a later merge could remove that recording."""
+        try:
+            meta = json.loads((Path(run_dir) / RUN_FILE).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            meta = {}  # a run from before RUN_FILE
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
         record = {"id": run_id(run_dir), "run_dir": str(run_dir), "started": started(run_dir)}
         try:
             transcript = find_transcript(run_dir, meta)
@@ -823,7 +871,7 @@ def create_app(
 
     def rebuild_catalogue() -> None:
         """Fill the catalogue by reading every run folder, and save it. Run folders left by uploads whose transcription
-        never started are removed on the way (merge_recordings() does that on an untrusted site)."""
+        never started are removed on the way."""
         cutoff = time.time() - LEFTOVER_SECONDS
         for run_dir in run_dirs(transcripts):
             record = load_run(run_dir)
@@ -838,10 +886,11 @@ def create_app(
         """After a start from the catalogue file, bring it in line with the run folders, in the background. Then a start
         ends where the old folder scan did even when the file missed something (a save that failed, two versions of
         the site running during a deploy, or an older version run in between): add the runs it lacks and pick up their
-        work, refresh the runs it has, drop the runs whose folders are gone, and remove leftover run folders."""
+        work, refresh the runs it has, drop the runs whose folders are gone, and remove leftover run folders. A folder
+        that can't be listed raises OSError before anything changes: a partial listing would drop the runs it missed."""
         cutoff = time.time() - LEFTOVER_SECONDS
         listed = set()
-        for run_dir in run_dirs(root):
+        for run_dir in run_dirs(root, strict=True):
             job_id = run_id(run_dir)
             listed.add(job_id)
             with lock:
@@ -901,12 +950,38 @@ def create_app(
     def check_catalogue(root: Path) -> None:
         """The background half of a start from the catalogue file: reconcile it, then merge duplicate recordings, which
         must know every run first so that no recording a run uses is taken for unused."""
-        reconcile(root)
-        if settings.hosted:
-            try:
-                merge_recordings()
-            except OSError as error:  # e.g. a recording removed meanwhile; the next start merges again
-                print(f"Could not merge duplicate recordings ({error}).", flush=True)
+        try:
+            reconcile(root)
+        except OSError as error:  # the storage did not answer: the catalogue stays as loaded, the next start checks
+            print(f"Could not check the talk catalogue against the run folders ({error}).", flush=True)
+            return
+        tidy_recordings()
+
+    def tidy_recordings() -> None:
+        """merge_recordings() on a hosted site. A storage error leaves everything as it is until the next start."""
+        if not settings.hosted:
+            return
+        try:
+            merge_recordings()
+        except OSError as error:  # e.g. a recording removed meanwhile, or a folder that could not be listed
+            print(f"Could not merge duplicate recordings ({error}).", flush=True)
+
+    def every_run_known() -> bool:
+        """Whether every run in the storage is in the catalogue. Checked on a hosted site before a recording is removed,
+        so that a run whose folder could not be read just now (a passing storage error) never loses its recording.
+        Folders that hold no run (holds_run) don't count. False, saying which folder, when one can't be checked."""
+        try:
+            listed = run_dirs(strict=True)
+            with lock:
+                unknown = [run for run in listed if run_id(run) not in jobs and str(run) not in deleted]
+            for run_dir in unknown:
+                if holds_run(run_dir):
+                    print(f"Recordings kept for now: the run in {run_dir} could not be read.", flush=True)
+                    return False
+        except OSError as error:
+            print(f"Recordings kept for now: the run folders could not all be listed ({error}).", flush=True)
+            return False
+        return True
 
     def note_outputs(job: dict) -> tuple[tuple[str, ...], bool]:
         """Check which stage outputs the run has and, when trusted, note them; also whether that changed. One run at a
@@ -1173,17 +1248,19 @@ def create_app(
         """Keep one stored copy of each recording. Runs that used a duplicate point at the kept copy instead. Run
         folders left by uploads whose transcription never started, and recordings no run uses, are removed once they
         are LEFTOVER_SECONDS old. Copies an unfinished run still reads from are left alone. A recording is removed only
-        while no run uses it, runs made meanwhile included, as this can run alongside requests."""
+        while no run uses it, runs made meanwhile included, as this can run alongside requests. (Leftover run folders
+        go while the catalogue is built or checked, just before this.)
+
+        Nothing is merged or removed unless every run folder is in the catalogue: a run missing from it (its folder
+        could not be read at the start) would lose its recording. It is tried again at the next start."""
         cutoff = time.time() - LEFTOVER_SECONDS
 
         def unused(path: Path) -> bool:
             with lock:
                 return all(job.get("source") != str(path) for job in jobs.values())
 
-        if not trusted:  # a trusted server removes them while it builds or checks its catalogue
-            for run_dir in run_dirs():
-                if leftover(run_dir, cutoff):
-                    shutil.rmtree(run_dir, ignore_errors=True)
+        if not every_run_known():
+            return
         users = {}
         for job in all_runs():
             users.setdefault(job.get("source"), []).append(job)
@@ -1234,8 +1311,8 @@ def create_app(
         A trusted server looks only at the runs its catalogue says need it. When the catalogue came from its file, a
         background thread then checks it against the folders, picks up what it finds, and only then merges."""
         checked = trusted and open_catalogue()
-        if settings.hosted and not checked:
-            merge_recordings()
+        if not checked:
+            tidy_recordings()
         if trusted:
             with lock:
                 waiting = sorted(Path(job["run_dir"]) for job in jobs.values() if job.get("unsettled"))
@@ -1327,10 +1404,24 @@ def create_app(
         if request.method in {"POST", "PUT"} and request.headers.get("Origin"):
             if urlparse(request.headers["Origin"]).netloc != request.host:
                 abort(403)
-        if settings.password and not session.get("authed") and request.endpoint not in {"login", "static", "health"}:
+        if settings.password and not signed_in() and request.endpoint not in {"login", "static", "health"}:
             if request.path.startswith("/api/"):
                 return jsonify(error="Sign in again: your session has ended."), 401
             return redirect(url_for("login"))
+
+    # A signed-in browser keeps a mark of the password it signed in with, keyed with the secret key (so the cookie
+    # reveals nothing about the password). Changing the password signs every browser out.
+    password_mark = hmac.new(app.secret_key.encode(), settings.password.encode(), "sha256").hexdigest()
+
+    def signed_in() -> bool:
+        mark = session.get("authed")
+        return isinstance(mark, str) and hmac.compare_digest(mark, password_mark)
+
+    @app.after_request
+    def secure_headers(response):
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        return response
 
     @app.get("/health")  # Cloud Run reserves /healthz
     def health():
@@ -1344,7 +1435,7 @@ def create_app(
         if request.method == "POST":
             if hmac.compare_digest(request.form.get("password", "").encode(), settings.password.encode()):
                 session.permanent = True
-                session["authed"] = True
+                session["authed"] = password_mark
                 return redirect(url_for("index"))
             time.sleep(1)  # slows down password guessing
             error = "That password is not right."
@@ -1411,9 +1502,21 @@ def create_app(
             if busy:
                 return jsonify(error=BUSY_MESSAGE), 429
         uploads_dir.mkdir(parents=True, exist_ok=True)
+        drop_stale_uploads()
         upload_id = uuid4().hex
         upload_path(upload_id).write_bytes(b"")
         return jsonify(id=upload_id), 201
+
+    def drop_stale_uploads() -> None:
+        """Remove pieces of uploads that stopped coming in an hour ago. On Cloud Run this folder is in memory, and the
+        retention sweep, which also clears it, is off when recordings are kept."""
+        cutoff = time.time() - LEFTOVER_SECONDS
+        for path in uploads_dir.glob("*.part"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass  # finished or removed meanwhile
 
     @app.put("/api/uploads/<upload_id>")
     def upload_chunk(upload_id):
@@ -1734,7 +1837,9 @@ def create_app(
                 pass
         recording = Path(job.get("source") or "")
         if recording.is_file() and all(other.get("source") != str(recording) for other in all_runs()):
-            recording.unlink(missing_ok=True)
+            # Hosted, kept while a run could not be read: it may use it (the next start's merge removes it if not).
+            if not settings.hosted or every_run_known():
+                recording.unlink(missing_ok=True)
 
     @app.post("/api/jobs/<job_id>/delete")
     def delete_job(job_id):

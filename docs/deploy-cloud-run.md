@@ -105,6 +105,28 @@ gcloud run services remove-iam-policy-binding gujarati-transcriber --region asia
 gcloud run services add-iam-policy-binding gujarati-transcriber --region asia-southeast1 --member=allUsers --role=roles/run.invoker
 ```
 
+## Rolling back
+
+`deploy/deploy.sh` refuses to run with uncommitted changes, names each image after its commit, and checks `/health` once the new website is up. Only the newest two images are kept, so you can go back one deploy. Data written by a newer version (the talk catalogue, the search index, talk names) is ignored by an older one, so going back loses nothing.
+
+```bash
+gcloud run revisions list --service gujarati-transcriber --region asia-southeast1
+```
+
+```bash
+gcloud run services update-traffic gujarati-transcriber --region asia-southeast1 --to-revisions PREVIOUS_REVISION=100
+```
+
+```bash
+gcloud run jobs update gujarati-transcriber-gpu --region asia-southeast1 --image asia-southeast1-docker.pkg.dev/gujarati-transcriber-369/gujlish/gujarati-transcriber:PREVIOUS_COMMIT
+```
+
+Traffic then stays on that revision, even after later deploys, until you send it back to the newest one (after deploying the fix):
+
+```bash
+gcloud run services update-traffic gujarati-transcriber --region asia-southeast1 --to-latest
+```
+
 ## Translation and summaries online
 
 `deploy/setup.sh` asks for a Gemini API key (pressing Enter keeps the one already stored). When a key is stored, `deploy/deploy.sh` gives it to the service from Secret Manager and switches translation on. Keep the site password on, and set a spending limit on the key.

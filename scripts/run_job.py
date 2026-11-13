@@ -25,6 +25,7 @@ KEEP_EVENTS = 50  # the progress file holds the latest events; the website reads
 KEEP_LOGS = 12
 WRITE_EVERY_SECONDS = 2.0
 USAGE_EVERY_SECONDS = 30.0
+FINAL_WRITE_WAITS = (0, 2, 5, 10)  # the website waits for the last write (the result): tried again after these seconds
 
 
 def main() -> int:
@@ -34,18 +35,26 @@ def main() -> int:
     run = progress.parent.name
     step = progress.stem.removeprefix(".job-")
     began = time.time()
-    state = {"count": 0, "events": [], "logs": [], "done": False}
+    # The execution's name, so the website ignores this file if it is still being written after a newer job started.
+    state = {"count": 0, "events": [], "logs": [], "done": False, "execution": execution}
     last_write = last_usage = 0.0
 
-    def save(force=False):
+    def save(force=False) -> bool:
+        """Write the progress file and the usage record when due. A write the storage turns down (a passing error)
+        is logged and written again next time: it must never end the transcription the GPU is being paid for."""
         nonlocal last_write, last_usage
         now = time.time()
-        if force or now - last_write >= WRITE_EVERY_SECONDS:
-            write_json(progress, state)
-            last_write = now
-        if force or now - last_usage >= USAGE_EVERY_SECONDS:
-            usage.record(execution, began, now, step=step, run=run)
-            last_usage = now
+        try:
+            if force or now - last_write >= WRITE_EVERY_SECONDS:
+                write_json(progress, state)
+                last_write = now
+            if force or now - last_usage >= USAGE_EVERY_SECONDS:
+                usage.record(execution, began, now, step=step, run=run)
+                last_usage = now
+        except OSError as error:
+            print(f"Could not save the job's progress ({error}); trying again shortly.", flush=True)
+            return False
+        return True
 
     worker = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True
@@ -74,7 +83,10 @@ def main() -> int:
             save()
     code = worker.wait()
     state.update(done=True, code=code)
-    save(force=True)
+    for wait in FINAL_WRITE_WAITS:
+        time.sleep(wait)
+        if save(force=True):
+            break
     return code
 
 

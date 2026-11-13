@@ -8,6 +8,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source deploy/config.sh
 [[ "$PROJECT_ID" == "your-project-id" ]] && { echo "Set PROJECT_ID in deploy/config.sh first."; exit 1; }
+# The image is built from this folder but named after the commit, so a rollback to that name must get that commit.
+if [[ -n "$(git status --porcelain)" && "${ALLOW_DIRTY:-}" != "1" ]]; then
+  echo "Commit or stash your changes first (the image is named after the commit). ALLOW_DIRTY=1 overrides." >&2
+  exit 1
+fi
 
 tag="$IMAGE:$(git rev-parse --short HEAD)"
 number=$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')
@@ -65,5 +70,13 @@ if [[ -n "$gpus" && "$gpus" != "0" ]]; then
   exit 1
 fi
 echo "Website has no GPU. Transcriptions run on the $GPU_JOB job."
+
+# Smoke test: the new revision answers (this also starts it, so the first visit after a deploy is quick).
+url=$(gcloud run services describe "$SERVICE" --project "$PROJECT_ID" --region "$REGION" --format 'value(status.url)')
+if ! curl -fsS --max-time 120 "$url/health" >/dev/null; then
+  echo "ERROR: $url/health did not answer. To roll back, see docs/deploy-cloud-run.md, \"Rolling back\"." >&2
+  exit 1
+fi
+echo "Website is up: $url"
 
 deploy/guardrails.sh

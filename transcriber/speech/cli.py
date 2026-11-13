@@ -124,6 +124,18 @@ def run(args, progress=None) -> tuple[Path, Path, Path | None]:
         if progress:
             progress({"stage": stage, **details})
 
+    if not args.reset and not checkpoint_path.exists() and text_path.exists() and json_path.exists():
+        # Finished here already: e.g. a retry after the hosted GPU job's last progress write was lost. The checkpoint
+        # is gone, so transcribing again would start from the beginning. (--reset transcribes it again.)
+        try:
+            duration = json.loads(json_path.read_text(encoding="utf-8")).get("duration")
+        except (OSError, ValueError, AttributeError):
+            duration = None
+        if duration is not None:
+            print(f"Already transcribed: {json_path}", flush=True)
+            notify("complete", processed=duration, txt=str(text_path), json=str(json_path))
+            return text_path, json_path, None
+
     notify("loading", device=device)
 
     if args.reset and checkpoint_path.exists():

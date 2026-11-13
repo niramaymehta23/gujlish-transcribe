@@ -32,13 +32,18 @@ async function scenario(s) {
   const $ = id => (notices[id] = notices[id] || { textContent: '' });
   const setTimeout = (fn, ms) => { timers.push(ms); return 1; };
   const clearTimeout = () => {};
-  const fetch = async () => { fetches++; return { ok: true, status: 200, json: async () => s.runs }; };
-  const signedOut = () => false, renderRuns = () => {}, loadUsage = () => {};
-  let runs = [], upload = s.upload || null, runsTimer = null, wasBusy = false, napping = false;
+  const fetch = async () => {
+    fetches++;
+    if (s.fail) return { ok: false, status: 503, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => s.runs };
+  };
+  const signedOut = () => false, renderRuns = () => {}, loadUsage = () => {}, SERVER = 'the server';
+  let runs = s.shown || [], upload = s.upload || null, runsTimer = null, wasBusy = false, napping = false;
+  let runsFailures = s.failures || 0;
   let lastActivity = Date.now() - (s.idleMinutes || 0) * 60000;
-  eval(consts + '\n' + grab('awake') + '\n' + grab('later') + '\n' + grab('loadRuns'));
+  eval(consts + '\n' + ['awake', 'later', 'lostConnection', 'loadRuns'].map(grab).join('\n'));
   await loadRuns();
-  return { fetches, scheduled: timers };
+  return { fetches, scheduled: timers, notice: $('run-notice').textContent };
 }
 (async () => {
   const cases = JSON.parse(process.argv[2]);
@@ -54,6 +59,9 @@ CASES = {
     "transcribing": {"runs": [{"status": "transcribing"}]},
     "translating": {"runs": [{"status": "complete", "translation": {"status": "running"}}]},
     "uploading": {"runs": [], "upload": {"name": "talk.mp3"}},
+    "upload_failed": {"runs": [], "upload": {"name": "talk.mp3", "error": "The upload did not finish."}},
+    "server_error_while_busy": {"shown": [{"status": "transcribing"}], "fail": True},
+    "server_down_while_busy": {"shown": [{"status": "transcribing"}], "fail": True, "failures": 5},
     "busy_but_hidden": {"runs": [{"status": "transcribing"}], "hidden": True},
     "busy_but_away": {"runs": [{"status": "transcribing"}], "idleMinutes": 31},
 }
@@ -80,6 +88,16 @@ class PagePollingTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(len(self.results[name]["scheduled"]), 1)
                 self.assertGreaterEqual(self.results[name]["scheduled"][0], 1000)
+
+    def test_a_failed_upload_waits_for_you(self):
+        """Its card stays until dismissed, but nothing is running: asking every 3 s kept the site awake."""
+        self.assertEqual(self.results["upload_failed"]["scheduled"], [])
+
+    def test_server_errors_back_off_then_stop(self):
+        self.assertEqual(self.results["server_error_while_busy"]["scheduled"], [6000])
+        down = self.results["server_down_while_busy"]
+        self.assertEqual(down["scheduled"], [])  # the sixth failure in a row: wait for a click or a return to the tab
+        self.assertIn("Lost the connection", down["notice"])
 
     def test_no_updates_when_hidden_or_away(self):
         for name in ("busy_but_hidden", "busy_but_away"):
