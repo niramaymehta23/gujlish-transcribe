@@ -17,6 +17,10 @@ let islandOpen = false, islandKey = '', islandParts = null, sourceLine = '', log
 // steps you asked to stop. Keyed by talk: names sent to the server and not yet answered, shown over what it last said.
 const seen = new Map(), starting = new Map(), stopAsked = new Set(), renaming = new Map();
 let sel = null, touched = { gu: false, latin: false }, suggestTimer = null, suggestTicket = 0, noteTimer = null;
+// moment: a line of a talk opened from search or a link ({ id, t, summary, seg }), highlighted with a ▶. routing: a
+// link in the address bar (#search, #talk=…&t=…) is being followed, so the address stays. back: the page Search
+// was opened from, for the browser's Back button.
+let moment = null, routing = false, back = null, searchScroll = 0;
 const STAGE_KEYS = ['gujlish', 'translation', 'captions', 'summary'];
 const ACTIVE = ['queued', 'loading', 'transcribing'];
 const STOPPED = 'Stopped. Start it again to continue where it left off.';  // web.server.STOPPED
@@ -197,13 +201,25 @@ function drawWave(box, percent, stopped) {
 
 // ---- Pages: home (drop area and talks), the dictionary, and one talk ----
 function showPage(name) {
+  if (page === 'search') {
+    searchScroll = window.scrollY;
+    if (name !== 'search') abortSearch();  // nothing more is fetched (or paid for) for a page you left
+  }
   page = name;
   $('home').hidden = name !== 'home'; $('dict-view').hidden = name !== 'dict'; $('run-view').hidden = name !== 'run';
+  $('search-view').hidden = name !== 'search';
   $('all-talks').hidden = name === 'home';
-  closePops(); islandOpen = false;
+  if (name === 'search') $('search-btn').setAttribute('aria-current', 'page'); else $('search-btn').removeAttribute('aria-current');
+  // Leaving a search or a moment by a button, not a link: a new entry without the link, so Back returns to it.
+  if (!routing && name !== 'search' && location.hash) history.pushState({ page: name, id: jobId }, '', location.pathname + location.search);
+  stopMoment(); closePops(); islandOpen = false;
   if (name !== 'run') $('export-btn').hidden = true;
   updateDock();
   window.scrollTo(0, 0);
+}
+// A talk that is gone: the link to it is dropped from this entry, so Back never lands on it again.
+function dropLink() {
+  if (location.hash.startsWith('#talk=')) history.replaceState(null, '', location.pathname + location.search);
 }
 function openDictionary() {
   clearTimeout(pollTimer); closeEditor(); jobId = null; current = null; sessionStorage.removeItem('asr-job');
@@ -422,6 +438,7 @@ function watchRuns() {
 function select(id) {
   clearTimeout(pollTimer); closeEditor(); closeRename(false); notice('');
   jobId = id; shown = null; current = null; renderedFor = null; sheetKey = null; summaryShown = null; stageNotice = ''; gujlishNotice = ''; sourceLine = '';
+  moment = null;
   if (id) sessionStorage.setItem('asr-job', id); else sessionStorage.removeItem('asr-job');
   if (!id) { showPage('home'); renderRuns(); return; }
   showPage('run');
@@ -495,7 +512,7 @@ async function poll() {
     const response = await fetch(`/api/jobs/${id}`);
     if (signedOut(response) || jobId !== id) return;
     if (response.status === 404) {
-      runs = runs.filter(run => run.id !== id); select(null); loadRuns(); return;
+      runs = runs.filter(run => run.id !== id); dropLink(); select(null); loadRuns(); return;
     }
     if (!response.ok) throw new Error('Could not read progress.');
     const job = await response.json();
@@ -532,6 +549,7 @@ function renderResult(job) {
   if (view === 'translate' && !job.translation_text) view = 'fix';
   if (view === 'summary' && !job.summary_markdown) view = job.translation_text ? 'translate' : 'fix';
   renderView();
+  if (moment && moment.id === job.id && !moment.shown) showMoment();
 }
 function setView(name) {
   if (!current) return;
@@ -543,7 +561,7 @@ function renderView() {
   $('text-view').hidden = view === 'summary';
   $('summary-view').hidden = view !== 'summary';
   $('export-btn').hidden = false;
-  for (const button of document.querySelectorAll('.seg button')) button.setAttribute('aria-checked', String(button.dataset.script === script));
+  for (const button of document.querySelectorAll('.seg button[data-script]')) button.setAttribute('aria-checked', String(button.dataset.script === script));
   $('hint').textContent = view === 'translate' ? 'English under every line. Double-click a word to keep fixing.' : 'Double-click any word to fix it.';
   if (view !== 'summary') renderSheet();
   if (current.summary_markdown !== summaryShown) {
@@ -569,7 +587,7 @@ function segmentWords(index, latin) {
 function renderSheet() {
   const latin = Boolean(current.gujlish_tokens), english = view === 'translate';
   const key = [current.id, current.rev, script, english ? (current.english_segments || [current.translation_text]).join('\n') : ''].join('|');
-  if (key === sheetKey) { markSelection(); return; }
+  if (key === sheetKey) { markSelection(); markMoment(); return; }
   sheetKey = key;
   $('editor-home').append($('editor'));  // keep the fixer while the lines are replaced
   const sheet = $('sheet');
@@ -608,9 +626,9 @@ function renderSheet() {
   }
   sheet.replaceChildren(...rows);
   const first = sheet.querySelector('.w'); if (first) first.tabIndex = 0;  // one Tab stop; arrow keys move between words
-  placeEditor(); markSelection();
+  placeEditor(); markSelection(); markMoment();
 }
-for (const button of document.querySelectorAll('.seg button')) {
+for (const button of document.querySelectorAll('.seg button[data-script]')) {
   button.addEventListener('click', () => { script = button.dataset.script; closeEditor(); renderView(); });
 }
 function markSelection() {
@@ -966,17 +984,48 @@ function renderInfo() {
   $('info-list').replaceChildren(...rows.flatMap(([term, value]) => [el('dt', '', term), el('dd', '', value)]));
   $('info-source').textContent = sourceLine; $('info-source').hidden = !sourceLine;
 }
-// A time in the summary opens that line of the talk.
+// A time in the summary opens that line of the talk, as a moment.
 $('summary').addEventListener('click', e => {
   const chip = e.target.closest('.time-chip');
   if (!chip || !current) return;
-  const t = Number(chip.dataset.t);
+  moment = { id: current.id, t: Number(chip.dataset.t), summary: false };
+  showMoment();
+});
+// The line a moment at `t` seconds opens: the last line with words starting by then.
+function lineAt(t) {
   let index = 0;
   current.segments.forEach((segment, i) => { if (segment.start <= t + 0.5 && words(segment.text).length) index = i; });
+  return index;
+}
+// Shows the moment on screen: its line, highlighted with a ▶, or the summary for a point without a time.
+function showMoment() {
+  moment.shown = true;
+  if (moment.summary) { if (current.summary_markdown) setView('summary'); return; }
+  if (moment.t == null) return;
+  if (script !== 'gu' && !current.gujlish_tokens) script = 'gu';  // this talk has no Gujlish lines to show it in
+  moment.seg = lineAt(moment.t);
   setView(current.translation_text ? 'translate' : 'fix');
-  const line = $('sheet').querySelector(`.words[data-seg="${index}"]`);
+  const line = $('sheet').querySelector(`.words[data-seg="${moment.seg}"]`);
   if (line) { line.closest('.line').scrollIntoView({ behavior: 'smooth', block: 'center' }); line.querySelector('.w')?.focus({ preventScroll: true }); }
-});
+}
+function markMoment() {
+  const line = moment && current && moment.id === current.id && moment.seg != null ? $('sheet').querySelector(`.words[data-seg="${moment.seg}"]`) : null;
+  const row = line && line.closest('.line');
+  for (const other of $('sheet').querySelectorAll('.line.moment')) {
+    if (other === row) continue;
+    other.classList.remove('moment');
+    const play = other.querySelector('.moment-play');
+    if (play && play === momentButton) stopMoment();  // the moment moved on: its clip stops with its ▶
+    play?.remove();
+  }
+  if (!row || row.classList.contains('moment')) return;
+  row.classList.add('moment');
+  const button = playButton(current.id, current.segments[moment.seg].start, 'Play this moment', notice);
+  button.classList.add('moment-play');
+  // The lines were redrawn while the moment played: the new ▶ shows it playing.
+  if (momentButton && !momentButton.isConnected && momentButton.dataset.key === button.dataset.key) { button.className = momentButton.className; momentButton = button; }
+  row.querySelector('.stamp').append(button);
+}
 
 // ---- Pause, resume, cancel and delete ----
 async function act(path, body, id = jobId, button = null) {
@@ -1020,10 +1069,10 @@ $('delete-button').addEventListener('click', async () => {
       : `“${displayName(job)}” stops, and the recording and the progress so far are deleted.`,
     [{ label: finished ? 'Delete' : 'Cancel recording', value: true, kind: 'btn-accent danger' }, { label: 'Keep it', value: false }]);
   if (!yes) return;
-  const id = jobId;
+  const id = job.id;  // the talk the question named, even if another one is open by now
   if (await act('delete', null, id, $('delete-button'))) {
     logActivity('info', `${finished ? 'Deleted' : 'Cancelled'} “${displayName(job)}”`);
-    runs = runs.filter(run => run.id !== id); if (jobId === id) select(null);
+    runs = runs.filter(run => run.id !== id); if (jobId === id) { dropLink(); select(null); }
   }
 });
 
@@ -1451,6 +1500,286 @@ function dictionaryRow(text, detail, forget, rule = null) {
   return row;
 }
 
+// ---- A moment's sound: a short clip from where a line starts, cut on the server. One plays at a time ----
+let momentAudio = null, momentButton = null, momentTicket = 0;
+function stopMoment() {
+  momentTicket++;
+  if (momentAudio) { momentAudio.pause(); URL.revokeObjectURL(momentAudio.src); momentAudio = null; }
+  if (momentButton) { momentButton.classList.remove('busy', 'on'); momentButton = null; }
+}
+function playButton(id, start, label, report) {
+  const button = el('button', 'play', '▶︎'); button.type = 'button';
+  button.dataset.key = `${id}@${start}`; button.title = label; button.setAttribute('aria-label', label);
+  button.addEventListener('click', e => { e.preventDefault(); playMoment(button, id, start, report); });
+  return button;
+}
+async function playMoment(button, id, start, report) {
+  const again = momentButton === button;
+  stopMoment();
+  if (again) return;  // a second click stops it
+  const ticket = momentTicket;
+  momentButton = button; button.classList.add('busy');
+  try {
+    const response = await fetch(`/api/jobs/${encodeURIComponent(id)}/moment?start=${encodeURIComponent(start)}`);
+    if (signedOut(response) || ticket !== momentTicket) return;
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (ticket !== momentTicket) return;  // another ▶ was pressed meanwhile
+      stopMoment(); report(data.error || 'Could not play this moment.'); return;
+    }
+    const blob = await response.blob();
+    if (ticket !== momentTicket) return;
+    momentAudio = new Audio(URL.createObjectURL(blob));
+    momentAudio.addEventListener('ended', () => { if (ticket === momentTicket) stopMoment(); });
+    momentButton.classList.remove('busy'); momentButton.classList.add('on');
+    await momentAudio.play();
+  } catch { if (ticket === momentTicket) { stopMoment(); report('Could not play this moment.'); } }
+}
+
+// ---- Search: every talk's words (Gujarati, Gujlish, English, summary and name), or a question answered by Gemini from
+// the talks. Results are drawn with DOM nodes, never innerHTML: they hold transcripts and a model's answer ----
+const search = { mode: 'find', shown: null, loading: false, ticket: 0, abort: null, typing: null, settle: null, retry: null, tries: 0, askTicket: 0, askAbort: null };
+const SEARCH_INTRO = {
+  find: 'Every talk at once: names, Gujarati, Gujlish, English and summaries. Spelling needn’t be exact: vaat, vat and વાત all find the same word.',
+  ask: 'Ask in English, Gujarati or Gujlish. Gemini answers only from the talks, and each point links to its moment.',
+};
+const ASK_NOTE = 'Sends your question and the passages that best match it (text, not audio) to Google.';
+const momentLink = link => typeof link === 'string' && link.startsWith('#talk=') ? link : '#search';
+function saveSearch() {
+  try { sessionStorage.setItem('vaani-search', JSON.stringify({ q: $('search-input').value, mode: search.mode })); } catch { /* only a convenience */ }
+}
+function openSearch() {
+  if (page !== 'search') {
+    back = { id: jobId, page };
+    clearTimeout(pollTimer); closeEditor(); jobId = null; current = null; sessionStorage.removeItem('asr-job');
+    showPage('search');
+    if (location.hash !== '#search') history.pushState(null, '', '#search');
+    if (search.mode === 'find') runSearch(false);  // the talks may have changed since
+  }
+  $('search-input').focus(); $('search-input').select();
+}
+// Back to Search from a moment: the results are as you left them, scrolled where you were.
+function returnToSearch() {
+  clearTimeout(pollTimer); closeEditor(); jobId = null; current = null; sessionStorage.removeItem('asr-job');
+  const scroll = searchScroll;
+  showPage('search');
+  if (search.mode === 'find' && (search.loading || search.shown !== $('search-input').value.trim())) runSearch(false);
+  else window.scrollTo(0, scroll);
+}
+function setMode(mode, run = true) {
+  search.mode = mode === 'ask' ? 'ask' : 'find';
+  const asking = search.mode === 'ask';
+  for (const button of document.querySelectorAll('.seg button[data-mode]')) button.setAttribute('aria-checked', String(button.dataset.mode === search.mode));
+  $('search-input').placeholder = asking ? 'Ask about the talks' : 'Words in Gujarati, Gujlish or English';
+  $('search-input').enterKeyHint = asking ? 'send' : 'search';
+  $('search-input').setAttribute('aria-label', asking ? 'Ask a question about the talks' : 'Search all talks');
+  $('search-go').hidden = !asking;
+  $('search-results').hidden = asking;
+  $('answer').hidden = !asking || !$('answer').childElementCount;
+  saveSearch();
+  if (asking) { abortSearch(); showAsk(); } else if (run) runSearch(false); else showFound(null);
+}
+for (const button of document.querySelectorAll('.seg button[data-mode]')) {
+  button.addEventListener('click', () => { if (button.dataset.mode !== search.mode) { setMode(button.dataset.mode); $('search-input').focus(); } });
+}
+function abortSearch() {
+  clearTimeout(search.typing); clearTimeout(search.settle); clearTimeout(search.retry);
+  if (search.abort) search.abort.abort();
+  search.ticket++;
+}
+// While typing, words only (the last word may be unfinished); once you pause or press Enter, words and meaning.
+$('search-input').addEventListener('input', () => {
+  saveSearch();
+  if (search.mode === 'ask') { showAsk(); return; }
+  clearTimeout(search.typing); clearTimeout(search.settle);
+  if (!$('search-input').value.trim()) { abortSearch(); showFound(null); return; }
+  search.typing = setTimeout(() => runSearch(true), 150);
+  search.settle = setTimeout(() => runSearch(false), 800);
+});
+$('search-form').addEventListener('submit', e => {
+  e.preventDefault();
+  if (search.mode === 'ask') askTalks(); else runSearch(false);
+});
+async function runSearch(live, tries = 0) {
+  if (!live) { clearTimeout(search.typing); clearTimeout(search.settle); }
+  clearTimeout(search.retry);
+  const q = $('search-input').value.trim();
+  if (search.abort) search.abort.abort();
+  if (!q) { search.ticket++; showFound(null); return; }
+  const abort = search.abort = new AbortController(), ticket = ++search.ticket;
+  const params = new URLSearchParams({ q, live: live ? '1' : '0', meaning: live ? '0' : '1' });
+  try {
+    const response = await fetch(`/api/search?${params}`, { signal: abort.signal });
+    if (signedOut(response) || ticket !== search.ticket) return;
+    const data = await response.json().catch(() => ({}));
+    if (ticket !== search.ticket) return;
+    if (!response.ok) { put($('search-status'), data.error || 'Search did not work. Try again.'); return; }
+    showFound(data, q);
+    // The index is still being read after the server started: look again, less often as it takes longer, while you
+    // are here (leaving the page stops it; coming back to an idle page looks again).
+    if (data.state === 'loading') search.retry = later(() => runSearch(live, tries + 1), Math.min(1500 * 2 ** tries, 30000));
+  } catch (error) {
+    if (error.name !== 'AbortError' && ticket === search.ticket) put($('search-status'), `Could not reach ${SERVER}.`);
+  }
+}
+function showFound(data, q) {
+  $('search-foot').textContent = '';
+  search.shown = data ? q : null;
+  search.loading = Boolean(data && data.state === 'loading');
+  if (!data) {
+    put($('search-status'), '');
+    $('search-results').replaceChildren(el('p', 'search-intro', SEARCH_INTRO.find));
+    return;
+  }
+  const cards = data.talks.map(resultCard);
+  if (!cards.length) cards.push(el('p', 'search-intro', data.state === 'loading' ? 'Search is getting ready…' : `Nothing found for “${q}”.`));
+  $('search-results').replaceChildren(...cards);
+  const total = data.total || data.talks.length, shown = data.talks.length;
+  const status = data.state === 'loading' ? 'Getting ready…' : [
+    total ? `${total} talk${total === 1 ? '' : 's'}${total > shown ? ` · the best ${shown} shown` : ''}` : '',
+    data.meaning === 'on' ? 'words and similar meaning' : data.meaning === 'failed' ? 'words only: meaning search didn’t answer' : '',
+    data.indexing ? 'still adding the latest changes' : '',
+  ].filter(Boolean).join(' · ');
+  put($('search-status'), status);
+  if (data.meaning === 'on') $('search-foot').textContent = 'Similar meaning uses Gemini: what you search for is sent to Google.';
+}
+function resultCard(talk) {
+  const card = el('article', 'result');
+  const head = el('a', 'result-head'); head.href = `#talk=${encodeURIComponent(talk.id)}`; head.title = 'Open this talk';
+  const name = displayName(talk);
+  head.append(el('span', 'name', name), el('span', 'sub', [minutes(talk.duration), when(talk.started), talk.title ? talk.name : ''].filter(Boolean).join(' · ')));
+  if (talk.name_hit) head.append(el('span', 'hit-label', 'Name matches'));
+  card.append(head);
+  if (talk.hits.length) {
+    const list = el('ul', 'hits');
+    list.append(...talk.hits.map(hit => hitRow(talk, hit)));
+    card.append(list);
+  }
+  if (talk.more) card.append(el('p', 'more', `${talk.more} more in this talk`));
+  return card;
+}
+function hitRow(talk, hit) {
+  const row = el('li', 'hit'), at = el('div', 'hit-when');
+  const chip = el('a', 'time-chip', hit.time || 'Summary'); chip.href = momentLink(hit.link);
+  chip.title = hit.time ? 'Open the talk at this line' : 'Open the talk’s summary';
+  at.append(chip);
+  if (hit.start != null) at.append(playButton(talk.id, hit.start, `Play ${hit.time}`, text => put($('search-status'), text)));
+  const body = el('div', 'hit-body');
+  const label = hit.kind === 'line' ? '' : hit.label || 'Summary';  // the chip already says Summary for the overview
+  const tags = [hit.time || label !== 'Summary' ? label : '', hit.why.length === 1 && hit.why[0] === 'meaning' ? 'Similar meaning' : ''];
+  for (const tag of tags.filter(Boolean)) body.append(el('span', 'hit-label', tag));
+  const text = el('p', `hit-text ${hit.column}`);
+  if (hit.column === 'gu') text.lang = 'gu';
+  for (const [piece, marked] of hit.parts) text.append(marked ? el('mark', '', piece) : document.createTextNode(piece));
+  body.append(text);
+  row.append(at, body);
+  return row;
+}
+// Ask: one question at a time; Enter or the arrow sends it.
+function showAsk() {
+  if ($('answer').childElementCount) { $('answer').hidden = false; $('search-results').hidden = true; }
+  else { $('answer').hidden = true; $('search-results').hidden = false; $('search-results').replaceChildren(el('p', 'search-intro', SEARCH_INTRO.ask)); }
+  put($('search-status'), '');
+  $('search-foot').textContent = ASK_NOTE;
+}
+async function askTalks() {
+  const question = $('search-input').value.trim();
+  if (!question) { $('search-input').focus(); return; }
+  if ($('search-go').disabled) return;  // one question at a time: a second Enter would pay for the same answer twice
+  if (search.askAbort) search.askAbort.abort();
+  const abort = search.askAbort = new AbortController(), ticket = ++search.askTicket, card = $('answer');
+  const wait = el('div', 'answer-wait'), spin = el('span', 'spinner'); spin.setAttribute('aria-hidden', 'true');
+  wait.append(spin, el('span', '', 'Reading the talks and asking Gemini…'));
+  card.replaceChildren(el('p', 'label', question), wait); card.hidden = false; $('search-results').hidden = true;
+  $('search-go').disabled = true;
+  try {
+    const response = await fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }), signal: abort.signal });
+    if (signedOut(response) || ticket !== search.askTicket) return;
+    const data = await response.json().catch(() => ({}));
+    if (ticket !== search.askTicket) return;
+    if (!response.ok) { card.replaceChildren(el('p', 'label', question), el('p', 'error', data.error || 'Could not answer just now. Try again.')); return; }
+    renderAnswer(question, data);
+  } catch (error) {
+    if (error.name !== 'AbortError' && ticket === search.askTicket) card.replaceChildren(el('p', 'label', question), el('p', 'error', `Could not reach ${SERVER}.`));
+  } finally { if (ticket === search.askTicket) $('search-go').disabled = false; }
+}
+function citeChip(cite) {
+  const chip = el('a', 'cite', String(cite.n)); chip.href = momentLink(cite.link);
+  chip.title = [displayName(cite), cite.time].filter(Boolean).join(' · ');
+  chip.setAttribute('aria-label', `Source ${cite.n}: ${chip.title}`);
+  return chip;
+}
+function renderAnswer(question, data) {
+  const cites = new Map((data.citations || []).map(cite => [cite.n, cite]));
+  const text = el('p', 'answer-text');
+  if (/[઀-૿]/.test(data.answer || '')) text.lang = 'gu';
+  for (const piece of String(data.answer || '').split(/(\[\d+\])/)) {
+    const number = piece.match(/^\[(\d+)\]$/);
+    if (!number) { if (piece) text.append(piece); continue; }
+    const cite = cites.get(Number(number[1]));
+    if (cite) text.append(citeChip(cite));
+  }
+  const parts = [el('p', 'label', question), text];
+  if (cites.size) {
+    const list = el('ol', 'sources');
+    for (const cite of cites.values()) {
+      const item = el('li', 'source'), open = el('a', 'source-link'); open.href = momentLink(cite.link);
+      open.append(el('span', 'cite', String(cite.n)), el('span', 'source-name', displayName(cite) || 'A talk'));
+      item.append(open, el('span', 'source-when', [cite.time, cite.kind === 'line' ? '' : cite.label].filter(Boolean).join(' · ')));
+      if (cite.start != null) item.append(playButton(cite.id, cite.start, `Play ${cite.time}`, message => put($('search-status'), message)));
+      list.append(item);
+    }
+    parts.push(list);
+  }
+  if (data.model) parts.push(el('p', 'small', `Answered by Gemini (${data.model}) from ${data.consulted} passage${data.consulted === 1 ? '' : 's'} of the talks. Open a moment to check before you quote it.`));
+  $('answer').replaceChildren(...parts);
+}
+$('search-btn').addEventListener('click', openSearch);
+// "/" opens Search from anywhere, except while typing.
+document.addEventListener('keydown', e => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || $('modal').open) return;
+  const target = e.target;
+  if (target.closest && target.closest('input, textarea, select, [contenteditable]')) return;
+  e.preventDefault(); openSearch();
+});
+// Links: #search is the Search page, #talk=…&t=… a moment of a talk (&view=summary its summary). The browser's Back
+// button walks back through them.
+function openMoment(id, t, summary) {
+  if (jobId !== id || page !== 'run') select(id);
+  moment = { id, t, summary };
+  if (current && current.id === id) showMoment();
+}
+function route() {
+  const hash = location.hash;
+  if (hash === '#search') {
+    if (page !== 'search') { if (!back) back = { id: null, page: 'home' }; returnToSearch(); }
+    return true;
+  }
+  const args = new URLSearchParams(hash.slice(1)), id = args.get('talk');
+  if (!id || !/^[\w-]{1,64}$/.test(id)) return false;
+  const t = args.has('t') ? Number(args.get('t')) : null;
+  routing = true;
+  try { openMoment(id, Number.isFinite(t) && t >= 0 ? t : null, args.get('view') === 'summary'); }
+  finally { routing = false; }
+  return true;
+}
+window.addEventListener('hashchange', () => {
+  if ($('modal').open) $('modal').close();  // a question about the page you left (Delete this talk?) no longer applies
+  if (route() || location.hash) return;
+  // No link: a page left by a button (its entry keeps which), or, Back past Search (perhaps several steps at once,
+  // from a moment), the page Search was opened from.
+  const left = history.state && history.state.page ? history.state : null;
+  if (!left && page !== 'search' && !back) return;
+  const from = left || back;
+  if (!left) back = null;
+  if (from && from.id) select(from.id); else if (from && from.page === 'dict') openDictionary(); else select(null);
+});
+try {
+  const saved = JSON.parse(sessionStorage.getItem('vaani-search'));
+  if (saved && typeof saved.q === 'string') $('search-input').value = saved.q.slice(0, 500);
+  setMode(saved && saved.mode, false);  // searched when the page is opened, not on every visit to the site
+} catch { setMode('find', false); }
+
 // Coming back to the tab or window: refresh at once, since nothing re-checks while the page is idle or hidden.
 let lastReturn = 0;
 function welcomeBack() {
@@ -1459,6 +1788,7 @@ function welcomeBack() {
   if (napping) { napping = false; $('run-notice').textContent = $('home-notice').textContent = ''; }
   loadRuns(); loadUsage();
   if (jobId) { pollFailures = 0; poll(); }
+  if (page === 'search' && search.mode === 'find' && search.loading) runSearch(false);  // it stopped looking while idle
 }
 document.addEventListener('visibilitychange', welcomeBack);
 window.addEventListener('focus', welcomeBack);
@@ -1476,4 +1806,6 @@ describeOptions();
 loadUsage();
 loadDictionary();
 // Steps already running or finished when the page opens are not news: the log starts with what changes from here.
-loadRuns().then(() => { logReady = true; const saved = sessionStorage.getItem('asr-job'); if (saved && runs.some(run => run.id === saved)) select(saved); });
+// A link to Search or to a moment opens it straight away; otherwise the talk open before a reload comes back.
+const linked = route();
+loadRuns().then(() => { logReady = true; const saved = sessionStorage.getItem('asr-job'); if (!linked && saved && runs.some(run => run.id === saved)) select(saved); });

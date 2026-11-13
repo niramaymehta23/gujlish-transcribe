@@ -40,17 +40,28 @@ RATE_LIMIT_RETRIES = 6
 MAX_WAIT_SECONDS = 60.0
 
 
-def _wait_seconds(attempt: int, retry_after: str | None = None) -> float:
+def _wait_seconds(attempt: int, retry_after: str | None = None, max_wait: float = MAX_WAIT_SECONDS) -> float:
     """Honor a server's Retry-After (in seconds) when given; otherwise back off exponentially with jitter."""
     if retry_after:
         try:
-            return min(MAX_WAIT_SECONDS, max(0.0, float(retry_after)))
+            return min(max_wait, max(0.0, float(retry_after)))
         except ValueError:
             pass  # an HTTP date: fall back to backoff
-    return min(MAX_WAIT_SECONDS, 2.0**attempt) * random.uniform(0.75, 1.25)
+    return min(max_wait, 2.0**attempt) * random.uniform(0.75, 1.25)
 
 
-def _request(url: str, payload: dict | None, headers: dict, timeout: float, retries: int = 3) -> dict:
+def _request(
+    url: str,
+    payload: dict | None,
+    headers: dict,
+    timeout: float,
+    retries: int = 3,
+    *,
+    rate_limit_retries: int = RATE_LIMIT_RETRIES,
+    max_wait: float = MAX_WAIT_SECONDS,
+) -> dict:
+    """POST `payload` (GET when None) and return the JSON reply. Server errors are retried `retries` times, "slow down"
+    replies up to `rate_limit_retries` times, waiting at most `max_wait` seconds between tries."""
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     all_headers = {"Content-Type": "application/json", **headers}
     attempt = timeouts = 0
@@ -61,9 +72,12 @@ def _request(url: str, payload: dict | None, headers: dict, timeout: float, retr
                 value = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")[:1000]
-            limit = max(retries, RATE_LIMIT_RETRIES) if retries and error.code in RATE_LIMIT_STATUS else retries
+            error.close()
+            limit = max(retries, rate_limit_retries) if retries and error.code in RATE_LIMIT_STATUS else retries
             if error.code in RETRY_STATUS and attempt < limit:
-                time.sleep(_wait_seconds(attempt, error.headers.get("Retry-After") if error.headers else None))
+                time.sleep(
+                    _wait_seconds(attempt, error.headers.get("Retry-After") if error.headers else None, max_wait)
+                )
                 attempt += 1
                 continue
             raise LLMError(f"HTTP {error.code} from {url}: {body}", error.code, body) from None
@@ -75,7 +89,7 @@ def _request(url: str, payload: dict | None, headers: dict, timeout: float, retr
             # A timeout is retried only once: each attempt already waited the full timeout, and a paid API may have
             # processed (and billed) the request anyway.
             if attempt < retries and not isinstance(reason, ConnectionRefusedError) and timeouts <= 1:
-                time.sleep(_wait_seconds(attempt))
+                time.sleep(_wait_seconds(attempt, max_wait=max_wait))
                 attempt += 1
                 continue
             raise LLMError(f"Could not reach {url}: {reason or type(error).__name__}") from None
@@ -134,6 +148,8 @@ class GeminiLLM:
         self.model = model or os.environ.get("VAANI_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL
         self.base_url = (base_url or os.environ.get("VAANI_GEMINI_URL") or DEFAULT_GEMINI_URL).rstrip("/")
         self.timeout = 300.0
+        # Tries after a failed request: long work waits for Gemini; a person waiting for an answer is told sooner.
+        self.retries, self.rate_limit_retries, self.max_wait = 3, RATE_LIMIT_RETRIES, MAX_WAIT_SECONDS
         self._api_key = api_key if api_key is not None else gemini_key()
 
     def prepare(self) -> None:
@@ -158,7 +174,10 @@ class GeminiLLM:
             **self.extra_payload,
         }
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        data = _request(f"{self.base_url}/chat/completions", payload, headers, self.timeout)
+        data = _request(
+            f"{self.base_url}/chat/completions", payload, headers, self.timeout, self.retries,
+            rate_limit_retries=self.rate_limit_retries, max_wait=self.max_wait,
+        )  # fmt: skip
         try:
             choice = data["choices"][0]
             text = _message_text(choice["message"]["content"])
