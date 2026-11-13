@@ -20,15 +20,15 @@ This deployment runs **Flex only** (`MODELS="flex"` in `deploy/config.sh`) for t
 | Behavior | Default when hosted | Change with |
 | --- | --- | --- |
 | Password for the whole site | Whatever you entered in setup, or none | `deploy/setup.sh` |
-| Visitors see only their own runs | Always | — |
+| Everyone signed in sees the same talks | Always | — |
 | Upload size limit | 300 MB | `VAANI_MAX_UPLOAD_MB` |
 | Recording length limit | 90 minutes | `VAANI_MAX_MINUTES` |
 | Recordings and results deleted | Never: kept in your bucket until you delete them | `VAANI_RETENTION_HOURS` |
-| One recording in progress per visitor | Always | — |
+| One recording transcribed (or waiting) at a time on the whole site | Always | — |
 | Translation and summaries | On when a Gemini key is stored (setup asks for it); Gemini runs on your API key | `VAANI_ALLOW_GEMINI` |
 | Large uploads | Sent in 8 MB pieces, because Cloud Run caps one request at 32 MB | — |
 
-Visitors are told apart by a signed cookie. Someone who clears their cookies or switches browsers no longer sees their earlier runs.
+The site password is the account: everyone who signs in, on any device, sees, opens, renames and deletes the same talks, and **Sign out** (in Details) asks for the password again. Without a password, anyone with the address can. A browser's signed cookie only keeps a half-sent upload to that browser.
 
 ## One-time setup (about 20 minutes)
 

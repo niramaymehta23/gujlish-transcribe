@@ -58,7 +58,7 @@
   </section>
 
   <footer class="foot-notes">
-    {% if hosted %}<p>Processed on this site’s server. Only you can see your recordings and results{% if retention_hours %}, and they are deleted after {{ retention_hours }} hours{% endif %}.</p>{% else %}<p>Processed on this computer. Recordings and results stay in your project folders.</p>{% endif %}
+    {% if hosted %}<p>Processed on this site’s server. {{ "Everyone signed in to this site" if has_password else "Anyone who opens this site" }} sees the same recordings and results{% if retention_hours %}, and they are deleted after {{ retention_hours }} hours{% endif %}.</p>{% else %}<p>Processed on this computer. Recordings and results stay in your project folders.</p>{% endif %}
     {% if "flex" in models %}<p>Built with Indic-Transcribe Flex from Bodhan AI / AI4Bharat.</p>{% endif %}
   </footer>
 </main>
@@ -80,7 +80,19 @@
       <button id="delete-button" class="btn btn-outline btn-sm danger" type="button"><svg class="only-phone" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V2.8h4v1.7M4 4.5l.7 9h6.6l.7-9M6.7 7v4.4M9.3 7v4.4"/></svg><span class="btn-text" id="delete-label">Delete</span></button>
     </div>
   </div>
-  <h1 class="title" id="run-title"></h1>
+  <div class="title-row" id="title-row">
+    <h1 class="title" id="run-title"></h1>
+    <button class="btn icon rename-btn" id="rename-btn" type="button" aria-label="Rename this talk" title="Rename" aria-controls="rename-form" aria-expanded="false" hidden><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.6 2.6a1.6 1.6 0 0 1 2.3 2.3L5.2 12.6l-3 .8.8-3z"/><path d="M9.4 3.8l2.3 2.3"/></svg></button>
+  </div>
+  <form class="rename" id="rename-form" hidden novalidate>
+    <label class="label" for="rename-input">Name this talk</label>
+    <div class="rename-row">
+      <input id="rename-input" maxlength="120" autocomplete="off" spellcheck="false">
+      <button class="btn btn-accent btn-sm" type="submit">Save</button>
+      <button class="btn btn-sm" id="rename-cancel" type="button">Cancel</button>
+    </div>
+    <p class="small">{{ "Every signed-in device shows this name. " if has_password else "" }}Leave it empty for the automatic name: the summary’s title, or the file name.</p>
+  </form>
   <nav class="steps" id="steps" aria-label="Steps"></nav>
   <p id="run-notice" class="run-notice" role="status"></p>
 
@@ -164,7 +176,7 @@
   </div>
   <div class="info-block">
     <p class="label">Workspace</p>
-    <p class="info-workspace"><i aria-hidden="true"></i>{{ "Online workspace" if hosted else "Local workspace" }}</p>
+    <div class="info-row"><p class="info-workspace"><i aria-hidden="true"></i>{{ "Online workspace" if hosted else "Local workspace" }}</p>{% if has_password %}<form method="post" action="{{ url_for('logout') }}"><button class="btn btn-outline btn-sm" id="sign-out" type="submit">Sign out</button></form>{% endif %}</div>
     {% if hosted %}<p class="small" id="gpu-usage" hidden title="GPU time used by transcriptions this month (UTC), and its estimated cost"></p>{% endif %}
   </div>
   <div class="info-block" id="legend">

@@ -36,7 +36,7 @@ ALL_STAGES = ("gujlish", "translation", "captions", "summary")
 
 
 def owner_of(visitor: str) -> str:
-    """The owner tag the site gives a browser (web.server owner_tag)."""
+    """The owner tag the site gave a browser before talks were shared, as left in old run folders' .owner files."""
     return hashlib.sha256(visitor.encode()).hexdigest()[:32]
 
 
@@ -147,7 +147,8 @@ class CatalogueBase(unittest.TestCase):
         self.assertTrue(background_check_done(app or self.app))
 
     def add_talk(self, number, *, stages=(), visitor=VISITOR, finished=True, meta=None, run=None, suggestion=False):
-        """A run folder as the site leaves it: its RUN_FILE and owner, the transcript, and the outputs of `stages`."""
+        """A run folder as the site leaves it: its RUN_FILE, the transcript, and the outputs of `stages`; also an
+        .owner file, as the site left before talks were shared."""
         name = f"talk{number:03d}"
         run_dir = self.transcripts / name / "flex-mixed" / (run or f"20261101-120000-{number:06d}")
         run_dir.mkdir(parents=True)
@@ -582,18 +583,18 @@ class TestRestarts(CatalogueBase):
         self.assertEqual(self.saved_runs()[0]["done"], ["translation"])
 
 
-class TestOwnersDeletesAndRetention(CatalogueBase):
-    def test_each_browser_sees_only_its_own_talks(self):
+class TestSharingDeletesAndRetention(CatalogueBase):
+    def test_every_browser_sees_every_talk(self):
         self.add_talk(1)
-        self.add_talk(2, visitor=STRANGER)
+        self.add_talk(2, visitor=STRANGER)  # folders from before talks were shared keep an .owner file: ignored
         self.start()
         stranger = self.browser(STRANGER)
-        mine, theirs = self.history(), self.history(stranger)
-        self.assertEqual([entry["name"] for entry in mine], ["talk001.wav"])
-        self.assertEqual([entry["name"] for entry in theirs], ["talk002.wav"])
-        self.open(mine[0]["id"])  # cached now, still only for its owner
-        self.assertEqual(stranger.get(f"/api/jobs/{mine[0]['id']}").status_code, 404)
-        self.assertNotIn("owner", self.open(mine[0]["id"]))
+        self.assertEqual([entry["name"] for entry in self.history()], ["talk002.wav", "talk001.wav"])
+        self.assertEqual(self.history(stranger), self.history())
+        for entry in self.history():
+            self.assertEqual(self.open(entry["id"], stranger), self.open(entry["id"]))  # cached for everyone
+        self.assertNotIn("owner", self.open(entry["id"]))
+        self.assertEqual([run.get("owner") for run in self.saved_runs()], [None, None])
 
     def test_a_deleted_talk_leaves_the_list_the_cache_and_the_catalogue(self):
         gone, kept = self.add_talk(1), self.add_talk(2)

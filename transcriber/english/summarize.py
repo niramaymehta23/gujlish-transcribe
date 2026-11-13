@@ -22,6 +22,7 @@ from transcriber.files.textutil import escape_tags, fmt_time, parse_time, sha, w
 PROMPT_VERSION = "summary-v1"
 SECTION_CHARS = 16000  # source characters per extraction call
 FAN_IN = 8  # extractions merged per call
+UNTITLED = "Recording summary"  # the title of a summary the model gave none
 
 SYSTEM = """You summarize a recording of people speaking. The text you receive is an English translation of Gujarati \
 speech that was recognized automatically, so names, numbers and terms can be wrong. Each line starts with the time \
@@ -165,7 +166,7 @@ def finalize(summary: dict, segments: list[dict]) -> dict:
         return value.strip() if isinstance(value, str) else ""
 
     result = {
-        "title": text(summary.get("title")) or "Recording summary",
+        "title": text(summary.get("title")) or UNTITLED,
         "one_line": text(summary.get("one_line")),
         "overview": text(summary.get("overview")),
         "themes": [],
