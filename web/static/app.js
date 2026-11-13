@@ -6,7 +6,7 @@ let pollTimer = null, runsTimer = null, pollFailures = 0, noticeTimer = null;
 // pause when the tab is hidden, after IDLE_MS without a click or key press, and after MAX_POLL_FAILURES failed tries
 // in a row. Coming back, clicking or typing picks them up again.
 const IDLE_MS = 30 * 60 * 1000, MAX_POLL_FAILURES = 6;
-let lastActivity = Date.now(), napping = false, wasBusy = false;
+let lastActivity = Date.now(), napping = false, wasBusy = false, runsFailures = 0;
 // page: 'home', 'dict' or 'run'. view: the talk's step on screen. script: how its words are shown.
 let page = 'home', view = 'fix', script = 'gu';
 let renderedFor = null, sheetKey = null, summaryShown = null, caps = null, stageNotice = '', gujlishNotice = '', dockAction = null, dockAltAction = null;
@@ -94,12 +94,17 @@ const put = (node, text) => { if (node.textContent !== text) node.textContent = 
 
 // Whether live updates may ask the server again: the tab is on screen and you were active recently.
 function awake() {
-  if (document.hidden) return false;
+  if (napping || document.hidden) return false;
   if (Date.now() - lastActivity < IDLE_MS) return true;
-  if (!napping) { napping = true; $('run-notice').textContent = $('home-notice').textContent = 'Live updates paused while you were away. Click anywhere to refresh.'; }
+  napping = true; $('run-notice').textContent = $('home-notice').textContent = 'Live updates paused while you were away. Click anywhere to refresh.';
   return false;
 }
 function later(fn, ms) { return awake() ? setTimeout(fn, ms) : null; }
+// After repeated failed tries: stop asking until you click, press a key or come back to the tab (welcomeBack).
+function lostConnection() {
+  $('run-notice').textContent = $('home-notice').textContent = `Lost the connection to ${SERVER}. Click anywhere or come back to this tab to try again.`;
+  napping = true;
+}
 async function loadUsage() {
   const box = $('gpu-usage');
   if (!box) return;
@@ -322,17 +327,21 @@ $('busy-action').addEventListener('click', () => {
 });
 async function loadRuns() {
   clearTimeout(runsTimer);
+  let failed = true;
   try {
     const response = await fetch('/api/history');
     if (signedOut(response)) return;
-    if (response.ok) { runs = await response.json(); renderRuns(); }
+    if (response.ok) { runs = await response.json(); renderRuns(); failed = false; }
   } catch { /* the server may be restarting: try again shortly */ }
+  runsFailures = failed ? runsFailures + 1 : 0;
   // Ask again only while something is in progress and you are here. When idle the list refreshes when you come back
-  // to the page, so an open tab never keeps the hosted server awake.
-  const isBusy = Boolean(upload) || runs.some(busyRun);
+  // to the page, so an open tab never keeps the hosted server awake. A failed upload waits for you, not the server.
+  const isBusy = Boolean(upload && !upload.error) || runs.some(busyRun);
   if (wasBusy && !isBusy) loadUsage();  // a run just finished: its GPU time is counted now
   wasBusy = isBusy;
-  if (isBusy) runsTimer = later(loadRuns, 3000);
+  if (!isBusy) return;
+  if (runsFailures >= MAX_POLL_FAILURES) { lostConnection(); return; }
+  runsTimer = later(loadRuns, failed ? Math.min(30000, 3000 * 2 ** runsFailures) : 3000);
 }
 function mergeRun(job) {
   const run = runs.find(item => item.id === job.id);
@@ -532,11 +541,7 @@ async function poll() {
     if (jobId !== id) return;
     // Cloud Run sometimes swaps the server's machine; the new one picks the run up again within seconds.
     pollFailures++;
-    if (pollFailures >= MAX_POLL_FAILURES) {
-      $('run-notice').textContent = $('home-notice').textContent = `Lost the connection to ${SERVER}. Click anywhere or come back to this tab to try again.`;
-      napping = true;
-      return;
-    }
+    if (pollFailures >= MAX_POLL_FAILURES) { lostConnection(); return; }
     if (pollFailures > 2) notice(`Reconnecting to ${SERVER}…`);
     pollTimer = later(poll, Math.min(10000, 1000 * pollFailures));
   }
@@ -1784,7 +1789,7 @@ try {
 let lastReturn = 0;
 function welcomeBack() {
   if (document.hidden || Date.now() - lastReturn < 2000) return;  // switching tabs fires both events
-  lastReturn = Date.now(); lastActivity = Date.now();
+  lastReturn = Date.now(); lastActivity = Date.now(); runsFailures = 0;
   if (napping) { napping = false; $('run-notice').textContent = $('home-notice').textContent = ''; }
   loadRuns(); loadUsage();
   if (jobId) { pollFailures = 0; poll(); }

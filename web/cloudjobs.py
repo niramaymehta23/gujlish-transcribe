@@ -26,6 +26,9 @@ STATUS_EVERY_SECONDS = 15.0  # how often Cloud Run is asked whether the executio
 FINISH_GRACE_SECONDS = 20.0  # after the execution ends, how long to wait for its last progress write to show up
 STOP_CHECK_SECONDS = 15.0  # after a cancel, how long to wait before checking that the execution really ended
 STOP_DEADLINE_SECONDS = 300.0  # a paused or stopped run's GPU job is cancelled again until it ends, for 5 minutes
+# The job's own time limit ends it. Past that limit plus this, with Cloud Run not answering for as long, the website
+# cancels the execution and stops following it, so the GPU queue never waits for ever.
+FOLLOW_GRACE_SECONDS = 600.0
 
 
 def events_file(run_dir: Path, step: str) -> Path:
@@ -168,13 +171,14 @@ def run_remote(
     still running. `on_execution(name or None)` records the execution in the run's state; `on_finish(status)` gets
     the final execution status (for the GPU usage log)."""
     progress = events_file(run_dir, step)
+    give_up = jobs.clock.time() + timeout_seconds + FOLLOW_GRACE_SECONDS
     execution = None
     if saved:
         try:
             if not jobs.status(saved)["done"]:
                 execution = saved  # still running: follow it instead of starting another one
         except (OSError, ValueError, KeyError):
-            pass
+            execution = saved  # can't tell: follow it rather than risk a second GPU job on the same run
     if execution is None:
         progress.unlink(missing_ok=True)
         env = {"VAANI_JOB_COMMAND": json.dumps(command), "VAANI_JOB_EVENTS": str(progress)}
@@ -186,10 +190,11 @@ def run_remote(
         on_start(run)
 
     seen, last_status, ended_at, status = 0, 0.0, None, None
+    answered = jobs.clock.time()  # when Cloud Run last answered a status call
     data: dict = {}
     while True:
         sleep(READ_EVERY_SECONDS)
-        data = _read(progress) or data
+        data = _read(progress, execution) or data
         count = int(data.get("count", 0))
         if count > seen:
             fresh = data.get("events", [])[-(count - seen) :]
@@ -203,12 +208,20 @@ def run_remote(
             last_status = now
             try:
                 status = jobs.status(execution)
+                answered = now
             except (OSError, ValueError, KeyError):
                 status = None  # Cloud Run briefly unreachable: keep reading the file
             if status and status["done"]:
                 ended_at = now
         if ended_at is not None and now - ended_at >= FINISH_GRACE_SECONDS:
             break  # the job ended without writing its result (killed, timed out, never started)
+        if now >= give_up and now - answered >= FOLLOW_GRACE_SECONDS:
+            # Past its time limit and nothing heard for long: make sure it has ended, then stop following it.
+            try:
+                jobs.cancel(execution)
+            except (OSError, ValueError):
+                pass
+            break
 
     try:
         status = jobs.status(execution)
@@ -226,8 +239,14 @@ def run_remote(
     return 1, [f"Error: {reason}"]
 
 
-def _read(path: Path) -> dict | None:
+def _read(path: Path, execution: str) -> dict | None:
+    """The job's progress file, or None when it can't be read or another execution wrote it (an earlier job of the same
+    run whose last write landed after this one started)."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    writer = data.get("execution") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or (writer and writer != execution.rsplit("/", 1)[-1]):
+        return None
+    return data

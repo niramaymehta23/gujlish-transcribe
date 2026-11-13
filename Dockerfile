@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# Hosted web app for Google Cloud Run (GPU). Model weights are baked in so a cold start never downloads them.
+# One image for the hosted website (CPU only) and its GPU transcription job (Cloud Run). Model weights are baked in
+# so a cold start never downloads them.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 HF_HOME=/models
