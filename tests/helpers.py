@@ -33,3 +33,20 @@ class FakeWorker:
 
 def event(**fields) -> str:
     return "ASR_EVENT " + json.dumps(fields)
+
+
+def background_check_done(app, timeout: float = 10) -> bool:
+    """Wait for the catalogue check a hosted site runs in the background after starting from a saved catalogue (a
+    second app on the same storage starts that way). It saves the catalogue, so a test waits for it before its
+    storage is removed. True once no check is running."""
+    thread = app.extensions.get("asr_reconcile")
+    if thread is not None:
+        thread.join(timeout)
+    return thread is None or not thread.is_alive()
+
+
+def wait_for_background_check(test, app) -> None:
+    """Have `test` wait for the app's background check before the storage made earlier in setUp is removed."""
+    test.addCleanup(
+        lambda: test.assertTrue(background_check_done(app), "the background catalogue check is still running")
+    )

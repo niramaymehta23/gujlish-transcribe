@@ -2,7 +2,11 @@
 on a separate queue, so a translation never waits for a transcription or the reverse.
 
 Each run keeps a small state file in its folder (RUN_FILE). A restarted server still lists every run, opens it by the
-same id, and picks up work a restart cut short. Hosted on Cloud Run, the machine can be replaced at any time."""
+same id, and picks up work a restart cut short. Hosted on Cloud Run, the machine can be replaced at any time.
+
+Hosted, the folders sit in a storage bucket where every file check, listing and read is a network request. There the
+server keeps a catalogue of every run in memory, saved to CATALOGUE_FILE, and keeps finished talks' files in a memory
+cache, so opening the talk list or a finished talk touches no files."""
 
 import hashlib
 import hmac
@@ -16,6 +20,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -70,6 +75,13 @@ WORD_PAD = 0.4  # seconds of audio played around words whose times are known (a 
 ROUGH_PAD = 1.0  # and around words whose times are estimated
 LEFTOVER_SECONDS = 3600  # unused recordings and empty run folders younger than this may belong to an upload under way
 EVENT_PREFIX = "ASR_EVENT "
+CATALOGUE_FILE = ".catalogue.json"  # every run, in the transcripts folder (create_app's catalogue)
+CATALOGUE_VERSION = 1  # a catalogue file of any other version is rebuilt from the run folders
+# What the catalogue keeps of each run as it is, besides its paths and the fields catalogue_entry() adds.
+CATALOGUE_FIELDS = ("name", "model", "mode", "status", "progress", "message", "duration", "processed", "size")
+CATALOGUE_FIELDS += ("sha256", "owner", "started")
+# Characters of finished talks' files kept in memory; parsed, they take about twice that in bytes (Nov 2026 talks).
+VIEW_CACHE_CHARS = 64 * 1024**2
 STOPPED = "Stopped. Start it again to continue where it left off."
 GPU_LIMIT_MESSAGE = (
     "This month's GPU limit ({hours:g} hours) is used up, so no new transcriptions can start. "
@@ -236,6 +248,181 @@ def gpu_timeout(duration: float | None) -> int:
     return int(min(3600, max(15 * 60, 10 * 60 + (duration or 3 * 3600) / 3)))
 
 
+def unsettled(meta: dict, status: str | None) -> bool:
+    """Whether recover() has to look at a run after a restart: steps still to run, a GPU job to follow or end, or a
+    transcription that was cut short. `meta` is its RUN_FILE."""
+    cut_short = status != "complete" and not meta.get("paused") and not meta.get("failed")
+    return bool(meta.get("pending") or meta.get("execution") or cut_short)
+
+
+def outputs(transcript_json) -> tuple[str, ...]:
+    """The stages whose output is on disk for a finished transcript (one file check each)."""
+    if not transcript_json:
+        return ()
+    return tuple(key for key in STAGES if stage_output(transcript_json, key).exists())
+
+
+def leftover(run_dir: Path, cutoff: float) -> bool:
+    """A run folder left by an upload whose transcription never started, made before `cutoff`."""
+    began = started(run_dir)
+    if not began or datetime.fromisoformat(began).timestamp() >= cutoff:
+        return False
+    return not read_meta(run_dir) and not any(run_dir.glob(".*.partial.json")) and not find_transcript(run_dir, {})
+
+
+def relative(path, base: Path) -> str | None:
+    """`path` relative to `base` when it is inside it (so a catalogue survives the storage moving), else as it is."""
+    if not path:
+        return None
+    try:
+        return str(Path(path).relative_to(base))
+    except ValueError:
+        return str(path)
+
+
+class ViewCache:
+    """Finished talks' files (talk_files), least recently used dropped first once they pass `budget` characters.
+
+    Each talk has a generation, raised whenever the talk changes. A load passes the generation it started at to put(),
+    which keeps the files only if nothing changed meanwhile: otherwise they may be from before the change."""
+
+    def __init__(self, budget: int):
+        self.budget, self.used = budget, 0
+        self.entries: OrderedDict[str, dict] = OrderedDict()
+        # One number per talk that ever changed while this server ran, so it grows only as fast as the catalogue.
+        self.generations: dict[str, int] = {}
+        self.lock = Lock()
+
+    def get(self, key: str) -> tuple[dict | None, int]:
+        """The talk's cached files (or None) and its generation, for put() after loading them."""
+        with self.lock:
+            files = self.entries.get(key)
+            if files is not None:
+                self.entries.move_to_end(key)
+            return files, self.generations.get(key, 0)
+
+    def put(self, key: str, generation: int, files: dict) -> None:
+        with self.lock:
+            if self.generations.get(key, 0) != generation or files["size"] > self.budget:
+                return
+            self._drop(key)
+            self.entries[key] = files
+            self.used += files["size"]
+            while self.used > self.budget:
+                self._drop(next(iter(self.entries)))
+
+    def forget(self, key: str) -> None:
+        with self.lock:
+            self.generations[key] = self.generations.get(key, 0) + 1
+            self._drop(key)
+
+    def _drop(self, key: str) -> None:
+        files = self.entries.pop(key, None)
+        if files is not None:
+            self.used -= files["size"]
+
+
+def talk_files(job: dict, made) -> dict:
+    """Everything a finished talk's page shows from its files, read once: the transcript, and the outputs of the stages
+    in `made` (no others are read). `size` counts the characters read, for the cache."""
+    sizes = []
+
+    def text(path: Path) -> str:
+        content = path.read_text(encoding="utf-8")
+        sizes.append(len(content))
+        return content
+
+    def optional(path: Path) -> str | None:
+        try:
+            return text(path)
+        except FileNotFoundError:
+            return None
+
+    def stat(path: Path):
+        try:
+            return path.stat()
+        except FileNotFoundError:
+            return None
+
+    files = {"text": text(Path(job["txt"])), "translation_text": None, "english": {}, "captions_current": False}
+    files.update(summary=None, cacheable=True)
+    if not job.get("json"):
+        files["size"] = sum(sizes)
+        return files
+    transcript_json = Path(job["json"])
+    paths = stage_paths(transcript_json)
+    segments = json.loads(text(transcript_json)).get("segments", [])
+    gujlish = load_gujlish(paths["gujlish_json"], segments)[0] if "gujlish" in made else None
+    stamps = (stat(transcript_json), stat(paths["gujlish_json"]) if "gujlish" in made else None)
+    files.update(
+        segments=[
+            {
+                "start": s["start"],
+                "end": s["end"],
+                "text": s.get("text", ""),
+                "fixes": s.get("fixes", []),
+                "suggestions": s.get("suggestions", []),
+            }
+            for s in segments
+        ],
+        gujlish_tokens=gujlish,
+        rev="-".join(str(stamp.st_mtime_ns) for stamp in stamps if stamp),
+        gujlish_text=None if gujlish is None else text(paths["gujlish_txt"]),
+    )
+    if gujlish is not None:
+        sizes.append(sum(len(token) for tokens in gujlish for token in tokens))  # read by load_gujlish
+    # Output that should be there but did not load or match may be a passing read error: not cached, read next time.
+    files["cacheable"] = "gujlish" not in made or gujlish is not None
+    if "translation" in made:
+        files["translation_text"] = text(paths["translation_txt"])
+        english = optional(paths["translation_json"])
+        if english is not None:
+            english = json.loads(english).get("segments", [])
+            # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
+            current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
+            # The page shows each line's English under it. Only segments with text were translated, in order, and a
+            # sample translation stops early: the others get None.
+            lines = iter(s.get("text", "") for s in english)
+            files["english"] = {
+                "english_stale": [s.get("source") for s in english] != current,
+                "english_segments": [next(lines, None) if s.get("text", "").strip() else None for s in segments],
+            }
+        files["captions_current"] = "captions" in made and captions_current(transcript_json)
+        files["cacheable"] &= "captions" not in made or files["captions_current"]
+    if "summary" in made:
+        markdown = text(paths["summary_md"])
+        youtube = optional(paths["youtube_json"])  # missing for a summary from before this step wrote them
+        if youtube is not None:
+            youtube = json.loads(youtube)
+            youtube = {key: youtube.get(key, "") for key in ("title", "description")}
+        english_at = stat(paths["translation_json"])
+        older = english_at is not None and paths["summary_md"].stat().st_mtime < english_at.st_mtime
+        files["summary"] = {"markdown": markdown, "youtube": youtube, "older": older}
+    files["size"] = sum(sizes)
+    return files
+
+
+def transcript_view(files: dict, state: dict) -> dict:
+    """Segments for the word editor, the Gujlish words lined up with them, the English and summary texts, and whether
+    those were made before the latest word fixes: `files` (talk_files) as far as the stages' states in `state` allow."""
+    view = {key: files[key] for key in ("segments", "gujlish_tokens", "rev")}
+    if files["gujlish_tokens"] is not None:
+        view["gujlish_text"] = files["gujlish_text"]
+    if state["translation"]["status"] == "complete":
+        view["translation_text"] = files["translation_text"]
+        view.update(files["english"])
+        # A translation made before the caption step, or whose captions were not redone after it changed.
+        view["captions_stale"] = state["captions"]["status"] != "running" and not files["captions_current"]
+    summary = files["summary"]
+    if state["summary"]["status"] == "complete" and summary is not None:
+        view["summary_markdown"] = summary["markdown"]
+        view["youtube_missing"] = summary["youtube"] is None
+        view["summary_stale"] = view.get("english_stale", False) or view["youtube_missing"] or summary["older"]
+        if summary["youtube"] is not None:
+            view["youtube"] = summary["youtube"]
+    return view
+
+
 def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None) -> Flask:
     settings = settings or Settings.from_env()
     # Hosted with a GPU job: transcription runs there and this website needs no GPU (web/cloudjobs.py).
@@ -269,8 +456,22 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     last_sweep = [0.0]
     sequence = [0]
     recovered = [False]
+    recover_lock = Lock()
+    # Trusted: the folders change only through this server, and through its GPU job, which the server follows to the
+    # end. So the server can know every run and every finished talk's files from memory: the catalogue below and
+    # `views`. A hosted site is trusted. Locally the command line writes to the same folders, so they are read live.
+    trusted = settings.hosted
+    # The catalogue is `jobs`, saved after each change of state (not of progress) to one file, so a start reads one
+    # file instead of every run folder. Its place is fixed here, so a late background save cannot land elsewhere.
+    transcripts = storage.TRANSCRIPTS
+    catalogue_path = transcripts / CATALOGUE_FILE
+    save_lock = Lock()
+    saving = {"dirty": False, "writing": False}
+    outputs_lock = Lock()  # one run's stage outputs checked and noted at a time (note_outputs)
+    views = ViewCache(VIEW_CACHE_CHARS)
     app.extensions["asr_jobs"] = jobs
     app.extensions["asr_settings"] = settings
+    app.extensions["asr_reconcile"] = None  # the thread checking the catalogue against the folders after a start
 
     def gpu_limit_reached() -> bool:
         """True once this month's GPU job time has reached the limit (only when transcription runs on a GPU job)."""
@@ -301,10 +502,12 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             session["visitor"] = uuid4().hex
         return hashlib.sha256(session["visitor"].encode()).hexdigest()[:32]
 
-    def owns(job: dict) -> bool:
+    def visible(job: dict) -> bool:
+        """Whether this browser may list and open the run: on a hosted site, only the runs it started. Every listing
+        and lookup asks here, so this is the one place that filter lives."""
         return not settings.hosted or job.get("owner") == owner_tag()
 
-    def run_dirs() -> list[Path]:
+    def run_dirs(root: Path | None = None) -> list[Path]:
         """transcripts/<recording>/<model>/<run>/ folders. Listed level by level, so one deleted in the meantime is
         skipped (Python 3.10's glob fails on it instead)."""
 
@@ -314,7 +517,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             except OSError:
                 return []
 
-        runs = [run for name in folders(storage.TRANSCRIPTS) for label in folders(name) for run in folders(label)]
+        runs = [
+            run for name in folders(root or storage.TRANSCRIPTS) for label in folders(name) for run in folders(label)
+        ]
         return [run for run in runs if str(run) not in deleted]
 
     def load_run(run_dir: Path) -> dict | None:
@@ -356,10 +561,15 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         recording = storage.RECORDINGS / (meta.get("recording") or record["name"])
         record.update(name=meta.get("name") or record["name"], source=str(recording), sha256=meta.get("sha256"))
         record["size"] = meta.get("size") or (recording.stat().st_size if recording.is_file() else None)
+        if trusted:
+            record.update(done=outputs(record.get("json")), unsettled=unsettled(meta, record["status"]))
         return record
 
     def restore(job_id: str) -> dict | None:
-        """Load a run this server has not seen yet, e.g. one a page opened before a restart. The caller holds the lock."""
+        """Load a run this server has not seen yet, e.g. one a page opened before a restart. The caller holds the lock.
+        A trusted server has every run in its catalogue, so there is nothing to look for."""
+        if trusted:
+            return None
         for run_dir in run_dirs():
             if run_id(run_dir) == job_id:
                 record = load_run(run_dir)
@@ -371,12 +581,16 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     def find_job(job_id: str) -> dict:
         """The job dict (the caller holds the lock), or 404 for an unknown run or someone else's."""
         job = jobs.get(job_id) or (restore(job_id) if HEX_ID.fullmatch(job_id) else None)
-        if not job or not owns(job):
+        if not job or not visible(job):
             abort(404)
         return job
 
     def all_runs() -> list[dict]:
-        """Every run on disk, newest first, loading the ones this server has not seen yet."""
+        """Every run, newest first: from the catalogue when trusted, else from disk, loading the ones this server has
+        not seen yet."""
+        if trusted:
+            with lock:
+                return sorted(jobs.values(), key=lambda job: os.path.basename(job["run_dir"]), reverse=True)
         found = []
         for run_dir in sorted(run_dirs(), key=lambda path: path.name, reverse=True):
             job_id = run_id(run_dir)
@@ -392,13 +606,205 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         return found
 
     def update_meta(run_dir, change) -> None:
-        """Read the run's RUN_FILE, let `change` edit it, write it back. Skipped once the run is being deleted."""
+        """Read the run's RUN_FILE, let `change` edit it, write it back. Skipped once the run is being deleted. When
+        trusted, the catalogue's note of whether a restart must look at the run follows the file."""
+        flipped = False
         with meta_lock:
             if str(run_dir) in deleted or not Path(run_dir).is_dir():
                 return
             meta = read_meta(run_dir)
             change(meta)
             write_json(Path(run_dir) / RUN_FILE, meta)
+            if trusted:
+                with lock:
+                    job = jobs.get(run_id(run_dir))
+                    if job is not None:
+                        now = unsettled(meta, job.get("status"))
+                        flipped, job["unsettled"] = job.get("unsettled") != now, now
+        if flipped:
+            save_catalogue()
+
+    def save_catalogue() -> None:
+        """Write the catalogue file (trusted only). A save asked for while another is being written is left to that
+        writer, which writes once more when it is done: a burst of changes costs two writes, never a queue of them.
+        A failed write is retried by the next save; each write holds every run, so none is lost meanwhile."""
+        if not trusted:
+            return
+        with save_lock:
+            saving["dirty"] = True
+            if saving["writing"]:
+                return
+            saving["writing"] = True
+        while True:
+            with save_lock:
+                if not saving["dirty"]:
+                    saving["writing"] = False
+                    return
+                saving["dirty"] = False
+            try:
+                with lock:
+                    runs = [catalogue_entry(job) for job in jobs.values()]
+                catalogue = {"version": CATALOGUE_VERSION, "runs": runs}
+                try:
+                    write_json(catalogue_path, catalogue)
+                except FileNotFoundError:  # a new site has no transcripts folder until its first run
+                    catalogue_path.parent.mkdir(exist_ok=True)  # not its parents: they are the storage itself
+                    write_json(catalogue_path, catalogue)
+            except BaseException as error:
+                with save_lock:
+                    saving.update(dirty=True, writing=False)
+                if not isinstance(error, OSError):
+                    raise
+                print(f"Could not save the talk catalogue ({error}); the next change saves it again.", flush=True)
+                return
+
+    def catalogue_entry(job: dict) -> dict:
+        """What the catalogue keeps of a run: what history and the run's page show without opening its folder, and
+        whether recover() has to look at it after a restart. Paths are kept relative to their folders."""
+        run_dir = Path(job["run_dir"])
+        entry = {key: job[key] for key in CATALOGUE_FIELDS if key in job}
+        if entry.get("status") == "complete":
+            entry.pop("processed", None)  # as for a finished run read from its folder (load_run)
+        entry.update(
+            run=relative(run_dir, transcripts),
+            source=relative(job.get("source"), storage.RECORDINGS),
+            txt=relative(job.get("txt"), run_dir),
+            json=relative(job.get("json"), run_dir),
+            done=list(job.get("done", ())),
+            unsettled=bool(job.get("unsettled", True)) or job.get("status") in ACTIVE,
+            title=job.get("title"),  # for naming talks; not shown yet
+        )
+        return entry
+
+    def catalogue_record(entry: dict) -> dict:
+        """A job record from a catalogue entry. Anything malformed raises, and the file is rebuilt."""
+        if not isinstance(entry.get("run"), str) or not entry["run"] or not isinstance(entry.get("status"), str):
+            raise ValueError("a run without a folder or a status")
+        if entry["status"] == "complete" and not (entry.get("txt") and entry.get("json")):
+            raise ValueError("a finished run without its transcript")
+        run_dir = transcripts / entry["run"]
+        record = {key: entry[key] for key in CATALOGUE_FIELDS if key in entry}
+        record.update(id=run_id(run_dir), run_dir=str(run_dir), title=entry.get("title"))
+        record["done"] = tuple(key for key in entry["done"] if key in STAGES)
+        record["unsettled"] = bool(entry["unsettled"]) or entry["status"] in ACTIVE  # cut short if it was running
+        for key, base in (("source", storage.RECORDINGS), ("txt", run_dir), ("json", run_dir)):
+            record[key] = str(base / entry[key]) if entry.get(key) else None
+        return record
+
+    def open_catalogue() -> bool:
+        """Load every run from the catalogue file; True when it could be used. A missing or damaged file, or one of
+        another version, is rebuilt from the run folders instead (False). Runs recover() has to look at are read again
+        from their folders, as their state may have moved on after the file was saved."""
+        try:
+            data = json.loads(catalogue_path.read_text(encoding="utf-8"))
+            if data.get("version") != CATALOGUE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}, not {CATALOGUE_VERSION}")
+            records = [catalogue_record(entry) for entry in data["runs"]]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            print(f"Building the talk catalogue from the run folders ({type(error).__name__}: {error}).", flush=True)
+            rebuild_catalogue()
+            return False
+        for record in records:
+            if record["unsettled"]:
+                fresh = load_run(Path(record["run_dir"]))
+                if fresh is None:
+                    continue  # its folder is gone or unreadable; reconcile() adds it back if it is there after all
+                record = {**fresh, "title": record["title"]}
+            with lock:
+                jobs.setdefault(record["id"], record)
+        return True
+
+    def rebuild_catalogue() -> None:
+        """Fill the catalogue by reading every run folder, and save it. Run folders left by uploads whose transcription
+        never started are removed on the way (merge_recordings() does that on an untrusted site)."""
+        cutoff = time.time() - LEFTOVER_SECONDS
+        for run_dir in run_dirs(transcripts):
+            record = load_run(run_dir)
+            if record:
+                with lock:
+                    jobs.setdefault(record["id"], record)
+            elif leftover(run_dir, cutoff):
+                shutil.rmtree(run_dir, ignore_errors=True)
+        save_catalogue()
+
+    def reconcile(root: Path) -> None:
+        """After a start from the catalogue file, bring it in line with the run folders, in the background. Then a start
+        ends where the old folder scan did even when the file missed something (a save that failed, two versions of
+        the site running during a deploy, or an older version run in between): add the runs it lacks and pick up their
+        work, refresh the runs it has, drop the runs whose folders are gone, and remove leftover run folders."""
+        cutoff = time.time() - LEFTOVER_SECONDS
+        listed = set()
+        for run_dir in run_dirs(root):
+            job_id = run_id(run_dir)
+            listed.add(job_id)
+            with lock:
+                job = jobs.get(job_id)
+            if job is not None:
+                refresh(job, run_dir)
+                continue
+            record = load_run(run_dir)
+            if record is None:
+                if leftover(run_dir, cutoff):
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                continue
+            with lock:
+                added = str(run_dir) not in deleted and jobs.setdefault(job_id, record) is record
+            if added and record["unsettled"]:
+                resume_run(run_dir)  # nobody could see it until now, so nothing else can be doing its work
+        with lock:
+            unlisted = [job for job_id, job in jobs.items() if job_id not in listed and job["status"] not in ACTIVE]
+        # Confirmed one by one: a run made after the listing began is not in it either.
+        gone = [job for job in unlisted if not Path(job["run_dir"]).is_dir()]
+        with lock:
+            for job in gone:
+                if jobs.get(job["id"]) is job:
+                    del jobs[job["id"]]
+        for job in gone:
+            views.forget(job["run_dir"])
+        save_catalogue()
+
+    def refresh(job: dict, run_dir: Path) -> None:
+        """Take in what changed in a known run's folder without this server: which stage outputs it has, and work its
+        RUN_FILE says a restart should pick up. A run with work under way is left alone."""
+        with lock:
+            if jobs.get(job["id"]) is not job or job["status"] in ACTIVE or busy(job, *STAGES):
+                return
+            settled = not job.get("unsettled")
+        if job["status"] == "complete" and note_outputs(job)[1]:
+            views.forget(job["run_dir"])
+        if settled and unsettled(read_meta(run_dir), job["status"]):
+            with lock:
+                job["unsettled"] = True
+            resume_run(run_dir)
+
+    def check_catalogue(root: Path) -> None:
+        """The background half of a start from the catalogue file: reconcile it, then merge duplicate recordings, which
+        must know every run first so that no recording a run uses is taken for unused."""
+        reconcile(root)
+        if settings.hosted:
+            try:
+                merge_recordings()
+            except OSError as error:  # e.g. a recording removed meanwhile; the next start merges again
+                print(f"Could not merge duplicate recordings ({error}).", flush=True)
+
+    def note_outputs(job: dict) -> tuple[tuple[str, ...], bool]:
+        """Check which stage outputs the run has and, when trusted, note them; also whether that changed. One run at a
+        time, so two stages ending together cannot each note the other's output as missing."""
+        with outputs_lock:
+            made = outputs(job.get("json"))
+            with lock:
+                changed = job.get("done") != made
+                if trusted:
+                    job["done"] = made
+        return made, changed
+
+    def took_in(job: dict) -> tuple[str, ...]:
+        """The run's files changed under it: a transcript or a stage's output came in. Note which stage outputs it has
+        now and drop what is cached of it, both before its new state shows, so no page sees the state without the
+        files. Returns the outputs."""
+        made = note_outputs(job)[0]
+        views.forget(job["run_dir"])
+        return made
 
     def drop_meta(run_dir, *keys):
         update_meta(run_dir, lambda meta: [meta.pop(key, None) for key in keys])
@@ -422,6 +828,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         with lock:
             busy = {job.get("run_dir") for job in jobs.values() if job.get("status") in ACTIVE}
             busy |= {job.get("source") for job in jobs.values() if job.get("status") in ACTIVE}
+        removed = []
         for run_dir in storage.TRANSCRIPTS.glob("*/*/*/"):
             try:
                 started_at = datetime.strptime(run_dir.name, "%Y%m%d-%H%M%S-%f")
@@ -431,7 +838,11 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 shutil.rmtree(run_dir, ignore_errors=True)
                 with lock:
                     for job_id in [k for k, job in jobs.items() if job.get("run_dir") == str(run_dir)]:
-                        del jobs[job_id]
+                        removed.append(jobs.pop(job_id))
+        for job in removed:
+            views.forget(job["run_dir"])
+        if removed:
+            save_catalogue()
         for folder in [*storage.TRANSCRIPTS.glob("*/*/"), *storage.TRANSCRIPTS.glob("*/")]:
             try:
                 folder.rmdir()  # only succeeds once empty
@@ -523,23 +934,24 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             except (OSError, ValueError, RuntimeError) as error:
                 code, logs = 1, [f"Error: Could not start the transcription job ({error})."]
         reason = finished_worker(job_id, "transcribe", token)
-        finished = not code and job.get("txt")
         if reason == "delete":
             shutil.rmtree(run_dir, ignore_errors=True)  # in case it wrote after the folder was removed
             return
-        if reason == "pause" and not finished:
+        if not code and job.get("txt"):
+            # The transcript is in, written here or by the GPU job, which has ended (run_remote returned).
+            took_in(job)
+            drop_meta(run_dir, "resumes", "failed", "paused")
+            # Gujlish follows straight away; English and the summary wait until you have fixed the words.
+            queue_stages(job_id, ("gujlish",))
+            change(status="complete", progress=100, message="Transcript ready")
+        elif reason == "pause":
             change(status="paused", message=f"Paused at {stopped_at(job)}. Resume continues from there.")
             update_meta(run_dir, lambda meta: meta.update(paused=True))
-            return
-        if not finished:
+        else:
             message = last_error(logs, "Transcription stopped. You can retry to resume completed chunks.")
             change(status="error", message=message)
             update_meta(run_dir, lambda meta: meta.update(failed=message))
-            return
-        drop_meta(run_dir, "resumes", "failed", "paused")
-        # Gujlish follows straight away; English and the summary wait until you have fixed the words.
-        queue_stages(job_id, ("gujlish",))
-        change(status="complete", progress=100, message="Transcript ready")
+        save_catalogue()
 
     def stage_command(transcript_json, key, engine="auto", recording=None):
         command = [sys.executable, str(ROOT / STAGES[key].script), transcript_json, "--progress-json"]
@@ -593,14 +1005,16 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         if reason == "delete":
             shutil.rmtree(job["run_dir"], ignore_errors=True)
             return False
+        made = took_in(job)  # however it ended, it may have written files
         if reason == "stop":
             set_stage(job, key, status="idle", progress=None, message=STOPPED)
-        elif not code and stage_output(job["json"], key).exists():
+        elif not code and key in made:
             set_stage(job, key, status="complete", progress=100, message="Ready")
         else:
             set_stage(job, key, status="error", message=last_error(logs, f"{verb} stopped. Start it again to resume."))
         done = job[key]["status"] == "complete"
         finish_pending(job["run_dir"], {key}, progressed=done)
+        save_catalogue()
         return done
 
     def run_stages(job_id, steps, token):
@@ -622,18 +1036,18 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
     def merge_recordings():
         """Keep one stored copy of each recording. Runs that used a duplicate point at the kept copy instead. Run
         folders left by uploads whose transcription never started, and recordings no run uses, are removed once they
-        are LEFTOVER_SECONDS old. Copies an unfinished run still reads from are left alone."""
+        are LEFTOVER_SECONDS old. Copies an unfinished run still reads from are left alone. A recording is removed only
+        while no run uses it, runs made meanwhile included, as this can run alongside requests."""
         cutoff = time.time() - LEFTOVER_SECONDS
-        for run_dir in run_dirs():
-            began = started(run_dir)
-            empty = not read_meta(run_dir) and not any(run_dir.glob(".*.partial.json"))
-            if (
-                empty
-                and began
-                and datetime.fromisoformat(began).timestamp() < cutoff
-                and not find_transcript(run_dir, {})
-            ):
-                shutil.rmtree(run_dir, ignore_errors=True)
+
+        def unused(path: Path) -> bool:
+            with lock:
+                return all(job.get("source") != str(path) for job in jobs.values())
+
+        if not trusted:  # a trusted server removes them while it builds or checks its catalogue
+            for run_dir in run_dirs():
+                if leftover(run_dir, cutoff):
+                    shutil.rmtree(run_dir, ignore_errors=True)
         users = {}
         for job in all_runs():
             users.setdefault(job.get("source"), []).append(job)
@@ -651,68 +1065,102 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     update_meta(job["run_dir"], lambda meta: meta.update(recording=keep.name))
                     with lock:
                         job["source"] = str(keep)
+                    views.forget(job["run_dir"])
                     users.setdefault(str(keep), []).append(job)
-                path.unlink(missing_ok=True)
+                if unused(path):
+                    path.unlink(missing_ok=True)
         for name in fingerprints():
             path = storage.RECORDINGS / name
-            if str(path) not in users and path.stat().st_mtime < cutoff:
+            try:
+                old = path.stat().st_mtime < cutoff
+            except FileNotFoundError:
+                continue  # removed meanwhile
+            if old and str(path) not in users and unused(path):
                 path.unlink(missing_ok=True)
 
     def recover():
-        """Once per server start, resume the work a restart cut short. After MAX_RESUMES restarts in a row it waits for
-        you instead, so a recording that brings the server down cannot keep doing so. Hosted sites also merge
-        duplicate recordings."""
-        with lock:
+        """Once per server start, before any request is answered, load the runs (the catalogue, when trusted) and
+        resume the work a restart cut short. Requests that arrive meanwhile wait, so none sees the runs half loaded."""
+        if recovered[0]:
+            return
+        with recover_lock:
             if recovered[0]:
                 return
-            recovered[0] = True
-        if settings.hosted:
+            try:
+                resume_work()
+            finally:
+                recovered[0] = True
+
+    def resume_work():
+        """Resume the work a restart cut short. Hosted sites also merge duplicate recordings.
+
+        A trusted server looks only at the runs its catalogue says need it. When the catalogue came from its file, a
+        background thread then checks it against the folders, picks up what it finds, and only then merges."""
+        checked = trusted and open_catalogue()
+        if settings.hosted and not checked:
             merge_recordings()
-        for run_dir in run_dirs():
-            meta = read_meta(run_dir)
-            if meta.get("execution") and (meta.get("paused") or meta.get("failed")):
-                # Paused or failed, but its GPU job may still be running (this website restarted mid-stop): end it.
-                if gpu_job_running(meta["execution"]):
-                    Thread(target=RemoteRun(gpu_jobs, meta["execution"]).stop, daemon=True).start()
-                drop_meta(run_dir, "execution")
-                continue
-            unfinished = meta.get("source") and not meta.get("paused") and not meta.get("failed")
-            if not meta.get("pending") and not unfinished:
-                continue
+        if trusted:
             with lock:
-                job = jobs.get(run_id(run_dir)) or restore(run_id(run_dir))
-            if not job:
-                continue
-            if meta.get("execution") and job["status"] == "complete":
-                # Its GPU job finished while this website was asleep: carry on as if it had just finished here.
-                drop_meta(run_dir, "execution", "resumes", "failed", "paused")
-                if not stage_output(job["json"], "gujlish").exists():
-                    queue_stages(job["id"], ("gujlish",))
-                continue
-            if job["status"] == "error" and meta.get("execution") and gpu_job_running(meta["execution"]):
-                # Still transcribing on the GPU job: follow it again. Not a restart of the work, so not counted.
-                queue_transcription(job["id"], "Transcribing")
-                continue
-            transcribe = job["status"] == "error"
-            pending = [key for key in meta.get("pending", []) if key in STAGES] if job["status"] == "complete" else []
-            if not transcribe and not pending:
-                continue
-            if meta.get("resumes", 0) >= MAX_RESUMES:
-                update_meta(run_dir, lambda meta: meta.pop("pending", None))
-                with lock:
-                    if transcribe:
-                        job["message"] = f"Stopped after {MAX_RESUMES} server restarts in a row. Resume to try again."
-                    for key in pending:
-                        job[key] = {
-                            "status": "error",
-                            "message": "Stopped after several server restarts. Start it again.",
-                        }
-                continue
-            update_meta(run_dir, lambda meta: meta.update(resumes=meta.get("resumes", 0) + 1))
-            if transcribe:
-                queue_transcription(job["id"], "Continuing after a server restart")
-            else:
-                queue_stages(job["id"], pending, meta.get("engine", "auto"))
+                waiting = sorted(Path(job["run_dir"]) for job in jobs.values() if job.get("unsettled"))
+        else:
+            waiting = run_dirs()
+        for run_dir in waiting:
+            resume_run(run_dir)
+        if trusted:
+            save_catalogue()
+        if checked:
+            thread = Thread(target=check_catalogue, args=(transcripts,), daemon=True, name="asr-reconcile")
+            app.extensions["asr_reconcile"] = thread
+            thread.start()
+
+    def resume_run(run_dir: Path) -> None:
+        """Pick up what a restart cut short in one run, from its RUN_FILE. After MAX_RESUMES restarts in a row it waits
+        for you instead, so a recording that brings the server down cannot keep doing so."""
+        meta = read_meta(run_dir)
+        if meta.get("execution") and (meta.get("paused") or meta.get("failed")):
+            # Paused or failed, but its GPU job may still be running (this website restarted mid-stop): end it.
+            if gpu_job_running(meta["execution"]):
+                Thread(target=RemoteRun(gpu_jobs, meta["execution"]).stop, daemon=True).start()
+            drop_meta(run_dir, "execution")
+            return
+        unfinished = meta.get("source") and not meta.get("paused") and not meta.get("failed")
+        if not meta.get("pending") and not unfinished:
+            return
+        with lock:
+            job = jobs.get(run_id(run_dir)) or restore(run_id(run_dir))
+        if not job:
+            return
+        if meta.get("execution") and job["status"] == "complete":
+            # Its GPU job finished while this website was asleep: carry on as if it had just finished here.
+            took_in(job)
+            drop_meta(run_dir, "execution", "resumes", "failed", "paused")
+            if not output_exists(job, "gujlish"):
+                queue_stages(job["id"], ("gujlish",))
+            return
+        if job["status"] == "error" and meta.get("execution") and gpu_job_running(meta["execution"]):
+            # Still transcribing on the GPU job: follow it again. Not a restart of the work, so not counted.
+            queue_transcription(job["id"], "Transcribing")
+            return
+        transcribe = job["status"] == "error"
+        pending = [key for key in meta.get("pending", []) if key in STAGES] if job["status"] == "complete" else []
+        if not transcribe and not pending:
+            return
+        if meta.get("resumes", 0) >= MAX_RESUMES:
+            update_meta(run_dir, lambda meta: meta.pop("pending", None))
+            with lock:
+                if transcribe:
+                    job["message"] = f"Stopped after {MAX_RESUMES} server restarts in a row. Resume to try again."
+                for key in pending:
+                    job[key] = {
+                        "status": "error",
+                        "message": "Stopped after several server restarts. Start it again.",
+                    }
+            return
+        update_meta(run_dir, lambda meta: meta.update(resumes=meta.get("resumes", 0) + 1))
+        if transcribe:
+            queue_transcription(job["id"], "Continuing after a server restart")
+        else:
+            queue_stages(job["id"], pending, meta.get("engine", "auto"))
 
     def busy(job, *keys):
         return any((job.get(key) or {}).get("status") in {"queued", "running"} for key in keys)
@@ -727,9 +1175,13 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         state = dict(job.get(key) or {})
         if state.get("status") in {"queued", "running", "error"}:
             return state
-        if job.get("json") and stage_output(job["json"], key).exists():
+        if job.get("json") and output_exists(job, key):
             return {"status": "complete", "progress": 100, "message": "Ready"}
         return state or {"status": "idle"}
+
+    def output_exists(job, key) -> bool:
+        """Whether the stage's output is on disk: known from the catalogue when trusted, else checked."""
+        return key in job.get("done", ()) if trusted else stage_output(job["json"], key).exists()
 
     @app.before_request
     def guard_requests():
@@ -848,7 +1300,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         runs = []
         for job in all_runs():
             with lock:
-                if owns(job) and stored and (job.get("sha256") == sha or job.get("source") == str(stored)):
+                if visible(job) and stored and (job.get("sha256") == sha or job.get("source") == str(stored)):
                     runs.append({key: job.get(key) for key in ("id", "name", "started", "status")})
         return jsonify(stored=stored is not None, runs=runs)
 
@@ -917,6 +1369,9 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 "size": size,
                 "started": started(run_dir),
             }
+            if trusted:
+                jobs[job_id].update(done=(), unsettled=True, title=None)
+        save_catalogue()
         queue_transcription(job_id, "Queued for transcription")
         return jsonify(id=job_id), 202
 
@@ -928,67 +1383,36 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                 job["ahead"] = sum(
                     1 for other in jobs.values() if other["status"] in ACTIVE and other.get("seq", 0) < job["seq"]
                 )
-        hidden = {"source", "run_dir", "txt", "json", "owner", "seq", *STAGES}
+        # The catalogue's own fields stay on the server, so the page sees the same fields as before it existed.
+        hidden = {"source", "run_dir", "txt", "json", "owner", "seq", "done", "unsettled", "title", *STAGES}
         result = {k: v for k, v in job.items() if k not in hidden}
         result["run"] = Path(job["run_dir"]).name
         for key in STAGES:
             result[key] = stage_view(job, key)
         if result["status"] == "complete":
-            result["text"] = Path(job["txt"]).read_text(encoding="utf-8")
+            files = finished_files(job, result)
+            result["text"] = files["text"]
             if job.get("json"):
-                result.update(transcript_view(Path(job["json"]), result))
+                result.update(transcript_view(files, result))
         return jsonify(result)
 
-    def transcript_view(transcript_json: Path, state: dict) -> dict:
-        """Segments for the word editor, the Gujlish words lined up with them, the English and summary texts, and
-        whether those were made before the latest word fixes."""
-        segments = json.loads(transcript_json.read_text(encoding="utf-8")).get("segments", [])
-        paths = stage_paths(transcript_json)
-        gujlish, _ = load_gujlish(paths["gujlish_json"], segments)
-        view = {
-            "segments": [
-                {
-                    "start": s["start"],
-                    "end": s["end"],
-                    "text": s.get("text", ""),
-                    "fixes": s.get("fixes", []),
-                    "suggestions": s.get("suggestions", []),
-                }
-                for s in segments
-            ],
-            "gujlish_tokens": gujlish,
-            "rev": "-".join(
-                str(path.stat().st_mtime_ns) for path in (transcript_json, paths["gujlish_json"]) if path.exists()
-            ),
-        }
-        if gujlish is not None:
-            view["gujlish_text"] = paths["gujlish_txt"].read_text(encoding="utf-8")
-        if state["translation"]["status"] == "complete":
-            view["translation_text"] = paths["translation_txt"].read_text(encoding="utf-8")
-            if paths["translation_json"].exists():
-                english = json.loads(paths["translation_json"].read_text(encoding="utf-8")).get("segments", [])
-                # The translator reads each chunk without its cut full stop (transcriber.speech.postprocess.drop_cut_stop).
-                current = [drop_cut_stop(s["text"].strip()) for s in segments if s.get("text", "").strip()]
-                view["english_stale"] = [s.get("source") for s in english] != current
-                # The page shows each line's English under it. Only segments with text were translated, in order,
-                # and a sample translation stops early: the others get None.
-                lines = iter(s.get("text", "") for s in english)
-                view["english_segments"] = [next(lines, None) if s.get("text", "").strip() else None for s in segments]
-            # A translation made before the caption step, or whose captions were not redone after it changed.
-            view["captions_stale"] = state["captions"]["status"] != "running" and not captions_current(transcript_json)
-        if state["summary"]["status"] == "complete":
-            view["summary_markdown"] = paths["summary_md"].read_text(encoding="utf-8")
-            made = paths["translation_json"]
-            view["youtube_missing"] = not paths["youtube_json"].exists()  # a summary from before this step wrote them
-            view["summary_stale"] = (
-                view.get("english_stale", False)
-                or view["youtube_missing"]
-                or (made.exists() and paths["summary_md"].stat().st_mtime < made.stat().st_mtime)
+    def finished_files(job: dict, state: dict) -> dict:
+        """A finished talk's files for its page (talk_files). When trusted they stay in memory until the talk changes
+        (views); otherwise they are read on every request, since the command line may change them."""
+        if not trusted:
+            # As before: the Gujlish is always looked for, the English and summary only once their stage is complete.
+            return talk_files(
+                job, {"gujlish", "captions", *(key for key in STAGES if state[key]["status"] == "complete")}
             )
-            if not view["youtube_missing"]:
-                youtube = json.loads(paths["youtube_json"].read_text(encoding="utf-8"))
-                view["youtube"] = {key: youtube.get(key, "") for key in ("title", "description")}
-        return view
+        files, generation = views.get(job["run_dir"])
+        if files is None:
+            # The outputs as of now, after the generation: a stage that ends meanwhile then discards this load.
+            with lock:
+                made = (jobs.get(job["id"]) or job).get("done", ())
+            files = talk_files(job, made)
+            if files["cacheable"]:
+                views.put(job["run_dir"], generation, files)
+        return files
 
     def gemini_ready() -> bool:
         # Hosted sites use Gemini only when the owner allows it, because it runs on the owner's key.
@@ -1149,6 +1573,8 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     running.append(workers[(job_id, step)])
         for worker in running:
             stop_worker(worker)
+        views.forget(job["run_dir"])
+        save_catalogue()
         Thread(target=remove_run, args=(job, running), daemon=True).start()
         return jsonify(deleted=True)
 
@@ -1191,9 +1617,12 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             latin = replace_words(
                 segments, gujlish, places, end - start, correct, correct_gujlish, transliterator(dictionary["gujlish"])
             )
-            save_transcript(transcript_json, data)
-            if gujlish is not None:
-                write_gujlish(transcript_json, data, gujlish, engine)
+            try:
+                save_transcript(transcript_json, data)
+                if gujlish is not None:
+                    write_gujlish(transcript_json, data, gujlish, engine)
+            finally:
+                views.forget(job["run_dir"])  # also after a write that failed partway
             clip = None
             if body.get("remember", True):
                 example = evidence(data, transcript_json, segment, context, start)
@@ -1254,7 +1683,10 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
             suggestions.remove(found)
             if not suggestions:
                 segment.pop("suggestions", None)
-            save_transcript(transcript_json, data)
+            try:
+                save_transcript(transcript_json, data)
+            finally:
+                views.forget(job["run_dir"])  # also after a write that failed partway
             dictionary = load_dictionary()
             example = evidence(data, transcript_json, segment, segment.get("text", ""), start)
             rule = reject(dictionary, rule_id, example)
@@ -1438,7 +1870,7 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
         runs = []
         for job in all_runs():
             with lock:
-                if not owns(job):
+                if not visible(job):
                     continue
                 entry = {key: job.get(key) for key in fields}
                 entry["run"] = Path(job["run_dir"]).name
@@ -1447,8 +1879,8 @@ def create_app(*, executor=None, settings: Settings | None = None, gpu_jobs=None
                     if state.get("status") in {"queued", "running", "error"}:
                         entry[key] = {"status": state["status"], "progress": state.get("progress")}
             if entry["status"] == "complete":
-                # For the talk list's "Summary ready" / "English ready": the furthest finished step, found with as
-                # few file checks as possible (each one is a storage request on the hosted site).
+                # For the talk list's "Summary ready" / "English ready": the furthest finished step. Trusted, the
+                # catalogue knows; otherwise with as few file checks as possible.
                 for key in ("summary", "translation"):
                     if key in entry:  # queued, running or failed: look one step back
                         continue
